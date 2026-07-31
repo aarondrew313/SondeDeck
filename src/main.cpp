@@ -639,7 +639,7 @@ void setup() {
     powerSettings.begin();
     applyPowerOutputs();
     BatteryMonitor::begin();
-    localGps.begin();
+    localGps.begin(38400);
     frequencyManager.begin();
     lastUserActivityMs = millis();
 
