@@ -1,0 +1,17 @@
+.pio/
+.vscode/
+
+*.bin
+*.elf
+*.map
+*.o
+*.d
+
+project-tree*.txt
+*.zip
+*.log
+
+logs/
+
+.DS_Store
+Thumbs.db
