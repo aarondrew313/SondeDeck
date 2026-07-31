@@ -5,7 +5,8 @@
 
 class LocalGps {
 public:
-    bool begin(uint32_t baud = 9600);
+    // T-Deck Plus MIA-M10Q/u-blox GPS confirmed working at 38400 baud.
+    bool begin(uint32_t baud = 38400);
     void update();
 
     bool fixValid(uint32_t maxAgeMs = 5000);
