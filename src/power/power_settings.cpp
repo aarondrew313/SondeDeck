@@ -2,7 +2,7 @@
 
 namespace {
 constexpr uint8_t SCREEN_LEVELS[] = {25, 50, 75, 100};
-constexpr uint8_t KEYBOARD_LEVELS[] = {0, 60, 120, 180};
+constexpr uint8_t KEYBOARD_LEVELS[] = {0, 25, 50, 75, 100};
 constexpr uint8_t DIMMED_SCREEN_PERCENT = 12;
 constexpr uint32_t DIM_TIMEOUT_MS = 60000;
 
@@ -36,7 +36,7 @@ uint8_t PowerSettings::keyboardBrightness() const {
 }
 
 uint8_t PowerSettings::helpKeyboardBrightness() const {
-    return 180;
+    return 100;
 }
 
 bool PowerSettings::dimmingEnabled() const {

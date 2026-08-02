@@ -6,6 +6,7 @@
 #include "gps/local_gps.h"
 #include "input/keyboard.h"
 #include "input/trackball.h"
+#include "input/touch.h"
 #include "navigation/chase_math.h"
 #include "network/sonde_wifi.h"
 #include "power/battery_monitor.h"
@@ -20,12 +21,22 @@
 namespace {
 constexpr uint32_t SIGNAL_LOST_MS = 10000;
 constexpr uint32_t IDLE_DISPLAY_REFRESH_MS = 1000;
+constexpr uint32_t TOUCH_ACTION_DEBOUNCE_MS = 350;
+constexpr uint32_t BRIGHTNESS_ACTION_DEBOUNCE_MS = 250;
+
+// Runtime serial output is now release-style by default. Set the verbose
+// flags to true only when debugging decoder/GPS/radio internals.
+constexpr bool SERIAL_FRAME_SUMMARY = true;
+constexpr bool SERIAL_VERBOSE_FRAMES = false;
+constexpr bool SERIAL_DECODE_REJECTS = false;
+constexpr bool SERIAL_PREDICTION_UPDATES = false;
 
 Sx1262Receiver receiver;
 Rs41Decoder decoder;
 SondeDisplay display;
 TDeckKeyboard keyboard;
 TrackballInput trackball;
+TouchInput touchInput;
 LocalGps localGps;
 SdLogger sdLogger;
 PowerSettings powerSettings;
@@ -33,8 +44,8 @@ SondeWifi sondeWifi;
 OnlinePredictionClient onlinePrediction;
 FrequencyManager frequencyManager;
 
-DisplayPage activePage = DisplayPage::Overview;
-DisplayPage pageBeforeHelp = DisplayPage::Overview;
+DisplayPage activePage = DisplayPage::Home;
+DisplayPage pageBeforeHelp = DisplayPage::Home;
 
 SondeTelemetry lastTelemetry;
 NavigationInfo lastNavigation;
@@ -48,6 +59,10 @@ uint32_t lastValidFrameMs = 0;
 uint32_t lastDisplayRefreshMs = 0;
 uint32_t lastUserActivityMs = 0;
 char lastKeyboardKey = 0;
+uint8_t homeSelection = 0;
+bool touchEnabled = true;
+uint32_t lastTouchActionMs = 0;
+uint32_t lastBrightnessActionMs = 0;
 
 int8_t peakRssiDbm = -127;
 
@@ -58,6 +73,11 @@ void markUserActivity();
 void forceDisplayRefresh();
 void tuneReceiverTo(uint32_t frequencyHz);
 void updateFrequencyScan();
+void openHome();
+void moveHomeSelection(int8_t delta);
+void selectHomeTile(uint8_t index);
+void handleTouchEvent(const TouchEvent& event);
+void handleHelpButtonTouch();
 
 void waitForSplashContinue() {
     display.showSplash(true);
@@ -78,6 +98,14 @@ void waitForSplashContinue() {
 
         delay(20);
     }
+}
+
+uint8_t keyboardPercentToRaw(uint8_t percent) {
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    return static_cast<uint8_t>((180U * percent) / 100U);
 }
 
 void waitForKeyboardRelease() {
@@ -109,11 +137,11 @@ void applyPowerOutputs() {
     display.setBrightnessPercent(powerSettings.effectiveScreenBrightnessPercent());
 
     if (helpOpen()) {
-        keyboard.setBacklight(powerSettings.helpKeyboardBrightness());
+        keyboard.setBacklight(keyboardPercentToRaw(powerSettings.helpKeyboardBrightness()));
     } else if (powerSettings.displayDimmed()) {
         keyboard.setBacklight(0);
     } else {
-        keyboard.setBacklight(powerSettings.keyboardBrightness());
+        keyboard.setBacklight(keyboardPercentToRaw(powerSettings.keyboardBrightness()));
     }
 }
 
@@ -157,8 +185,93 @@ void updateFrequencyScan() {
     tuneReceiverTo(nextFrequency);
 }
 
+
+DisplayPage pageForHomeTile(uint8_t index) {
+    switch (index) {
+        case 0:
+            return DisplayPage::Overview;
+        case 1:
+            return DisplayPage::Sonde;
+        case 2:
+            return DisplayPage::Navigation;
+        case 3:
+            return DisplayPage::LocalGps;
+        case 4:
+            return DisplayPage::Logging;
+        case 5:
+            return DisplayPage::Power;
+        case 6:
+            return DisplayPage::Frequency;
+        case 7:
+            return DisplayPage::Online;
+        default:
+            return DisplayPage::Overview;
+    }
+}
+
+int8_t homeTileForPage(DisplayPage page) {
+    switch (page) {
+        case DisplayPage::Overview:
+            return 0;
+        case DisplayPage::Sonde:
+            return 1;
+        case DisplayPage::Navigation:
+            return 2;
+        case DisplayPage::LocalGps:
+            return 3;
+        case DisplayPage::Logging:
+            return 4;
+        case DisplayPage::Power:
+            return 5;
+        case DisplayPage::Frequency:
+            return 6;
+        case DisplayPage::Online:
+            return 7;
+        default:
+            return -1;
+    }
+}
+
+int8_t homeTileFromTouch(int16_t x, int16_t y) {
+    constexpr int16_t tileW = 74;
+    constexpr int16_t tileH = 70;
+    constexpr int16_t startX = 6;
+    constexpr int16_t startY = 38;
+    constexpr int16_t gapX = 5;
+    constexpr int16_t gapY = 9;
+
+    if (x < startX || y < startY) {
+        return -1;
+    }
+
+    for (uint8_t index = 0; index < 8; ++index) {
+        const uint8_t col = index % 4;
+        const uint8_t row = index / 4;
+        const int16_t tileX = startX + col * (tileW + gapX);
+        const int16_t tileY = startY + row * (tileH + gapY);
+
+        if (x >= tileX && x < tileX + tileW &&
+            y >= tileY && y < tileY + tileH) {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+bool touchInHelpButton(const TouchEvent& event) {
+    return event.x >= 292 && event.x <= 319 &&
+           event.y >= 215 && event.y <= 239;
+}
+
+bool touchInHomeButton(const TouchEvent& event) {
+    return event.x >= 244 && event.x < 292 &&
+           event.y >= 215 && event.y <= 239;
+}
+
 bool helpOpen() {
     return activePage == DisplayPage::Help ||
+           activePage == DisplayPage::HelpStatus ||
            activePage == DisplayPage::About;
 }
 
@@ -177,9 +290,26 @@ void openHelp() {
 
 void advanceHelpCycle() {
     if (activePage == DisplayPage::Help) {
+        activePage = DisplayPage::HelpStatus;
+    } else if (activePage == DisplayPage::HelpStatus) {
         activePage = DisplayPage::About;
     } else if (activePage == DisplayPage::About) {
         activePage = pageBeforeHelp;
+    } else {
+        pageBeforeHelp = activePage;
+        activePage = DisplayPage::Help;
+    }
+
+    applyPowerOutputs();
+}
+
+void handleHelpButtonTouch() {
+    if (activePage == DisplayPage::Help) {
+        activePage = DisplayPage::HelpStatus;
+    } else if (activePage == DisplayPage::HelpStatus) {
+        activePage = DisplayPage::About;
+    } else if (activePage == DisplayPage::About) {
+        activePage = DisplayPage::Help;
     } else {
         pageBeforeHelp = activePage;
         activePage = DisplayPage::Help;
@@ -207,9 +337,40 @@ void resetCounters() {
 void goToPage(DisplayPage page) {
     activePage = page;
 
+    const int8_t tile = homeTileForPage(page);
+    if (tile >= 0) {
+        homeSelection = static_cast<uint8_t>(tile);
+    }
+
     if (!helpOpen()) {
         applyPowerOutputs();
     }
+}
+
+void openHome() {
+    activePage = DisplayPage::Home;
+    applyPowerOutputs();
+}
+
+void moveHomeSelection(int8_t delta) {
+    int8_t next = static_cast<int8_t>(homeSelection) + delta;
+
+    if (next < 0) {
+        next = 7;
+    } else if (next > 7) {
+        next = 0;
+    }
+
+    homeSelection = static_cast<uint8_t>(next);
+}
+
+void selectHomeTile(uint8_t index) {
+    if (index > 7) {
+        index = 0;
+    }
+
+    homeSelection = index;
+    goToPage(pageForHomeTile(index));
 }
 
 void handleKey(char key) {
@@ -225,9 +386,15 @@ void handleKey(char key) {
         return;
     }
 
+    if ((key == '\r' || key == '\n') && activePage == DisplayPage::Home) {
+        selectHomeTile(homeSelection);
+        forceDisplayRefresh();
+        return;
+    }
+
     if (key == 0x1B) {
         closeHelp();
-        goToPage(DisplayPage::Overview);
+        openHome();
         forceDisplayRefresh();
         return;
     }
@@ -276,11 +443,23 @@ void handleKey(char key) {
             goToPage(DisplayPage::Online);
             break;
 
-        // Actions.
-        case 'B':
-            powerSettings.cycleScreenBrightness();
-            applyPowerOutputs();
+        case 'H':
+            closeHelp();
+            openHome();
             break;
+
+        // Actions.
+        case 'B': {
+            const uint32_t now = millis();
+
+            if (now - lastBrightnessActionMs >= BRIGHTNESS_ACTION_DEBOUNCE_MS) {
+                lastBrightnessActionMs = now;
+                powerSettings.cycleScreenBrightness();
+                applyPowerOutputs();
+            }
+
+            break;
+        }
 
         case 'K':
             powerSettings.cycleKeyboardBrightness();
@@ -290,6 +469,10 @@ void handleKey(char key) {
         case 'P':
             powerSettings.toggleDimmingEnabled();
             applyPowerOutputs();
+            break;
+
+        case 'D':
+            touchEnabled = !touchEnabled;
             break;
 
         case 'L':
@@ -319,7 +502,11 @@ void handleKey(char key) {
         case '>':
         case ']':
             closeHelp();
-            goToPage(nextDisplayPage(activePage));
+            if (activePage == DisplayPage::Home) {
+                moveHomeSelection(1);
+            } else {
+                goToPage(nextDisplayPage(activePage));
+            }
             break;
 
         case 'U':
@@ -327,7 +514,11 @@ void handleKey(char key) {
         case '<':
         case '[':
             closeHelp();
-            goToPage(previousDisplayPage(activePage));
+            if (activePage == DisplayPage::Home) {
+                moveHomeSelection(-1);
+            } else {
+                goToPage(previousDisplayPage(activePage));
+            }
             break;
 
         default:
@@ -345,8 +536,54 @@ void handleTrackballEvent(TrackballEvent event) {
     markUserActivity();
 
     if (event == TrackballEvent::Press) {
-        advanceHelpCycle();
+        if (activePage == DisplayPage::Home) {
+            selectHomeTile(homeSelection);
+        } else {
+            closeHelp();
+            openHome();
+        }
+
         forceDisplayRefresh();
+    }
+}
+
+void handleTouchEvent(const TouchEvent& event) {
+    if (event.type == TouchEventType::None || !touchEnabled) {
+        return;
+    }
+
+    markUserActivity();
+
+    if (event.type != TouchEventType::Tap) {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (now - lastTouchActionMs < TOUCH_ACTION_DEBOUNCE_MS) {
+        return;
+    }
+    lastTouchActionMs = now;
+
+    if (touchInHelpButton(event)) {
+        handleHelpButtonTouch();
+        forceDisplayRefresh();
+        return;
+    }
+
+    if (touchInHomeButton(event)) {
+        closeHelp();
+        openHome();
+        forceDisplayRefresh();
+        return;
+    }
+
+    if (activePage == DisplayPage::Home) {
+        const int8_t tile = homeTileFromTouch(event.x, event.y);
+
+        if (tile >= 0) {
+            selectHomeTile(static_cast<uint8_t>(tile));
+            forceDisplayRefresh();
+        }
     }
 }
 
@@ -361,6 +598,8 @@ void processInput() {
     }
 
     handleTrackballEvent(trackball.poll());
+
+    handleTouchEvent(touchInput.poll());
 
     while (Serial.available() > 0) {
         handleKey(static_cast<char>(Serial.read()));
@@ -389,11 +628,16 @@ AppStatus buildStatus() {
     status.localGpsChars = localGps.charsProcessed();
     status.localGpsPassed = localGps.passedChecksumCount();
     status.localGpsFailed = localGps.failedChecksumCount();
+    status.localGpsFix = lastNavigation.localFixValid;
+    status.localGpsSats = lastNavigation.localSatellites;
 
     status.screenBrightnessPercent = powerSettings.screenBrightnessPercent();
     status.effectiveScreenBrightnessPercent =
         powerSettings.effectiveScreenBrightnessPercent();
     status.keyboardBrightness = powerSettings.keyboardBrightness();
+    status.tftEnabled = true;
+    status.touchAvailable = touchInput.available();
+    status.touchEnabled = touchEnabled;
     status.displayDimmed = powerSettings.displayDimmed();
     status.dimmingEnabled = powerSettings.dimmingEnabled();
     status.dimTimeoutSeconds = powerSettings.dimTimeoutSeconds();
@@ -468,7 +712,8 @@ void refreshDisplay(bool force = false) {
         hasLastTelemetry ? &lastTelemetry : nullptr,
         lastGpsUsable,
         lastNavigation,
-        status
+        status,
+        homeSelection
     );
 }
 
@@ -524,6 +769,50 @@ void printTelemetry(
     const NavigationInfo& navigation,
     const LoggerStatus& loggerStatus
 ) {
+    if (!SERIAL_VERBOSE_FRAMES) {
+        if (SERIAL_FRAME_SUMMARY) {
+            Serial.printf(
+                "RS41 %s frame=%u rssi=%d peak=%d gps=%s",
+                value.serial,
+                value.frameNumber,
+                value.rssiDbm,
+                peakRssiDbm,
+                gpsPositionUsable ? "yes" : "no"
+            );
+
+            if (gpsPositionUsable) {
+                Serial.printf(
+                    " lat=%.6f lon=%.6f alt=%.1fm sats=%u",
+                    value.latitude,
+                    value.longitude,
+                    value.altitudeMetres,
+                    value.satellites
+                );
+            }
+
+            if (navigation.navValid) {
+                Serial.printf(
+                    " range=%.0fm brg=%.0f",
+                    navigation.distanceMetres,
+                    navigation.bearingDegrees
+                );
+            }
+
+            Serial.printf(
+                " log=%s freq=%.3fMHz ok=%lu gps=%lu bad=%lu\n",
+                loggerStatus.enabled
+                    ? (loggerStatus.lastWriteOk ? "ok" : "on")
+                    : "off",
+                receiver.frequencyHz() / 1000000.0,
+                static_cast<unsigned long>(validFrames),
+                static_cast<unsigned long>(gpsFrames),
+                static_cast<unsigned long>(rejectedFrames)
+            );
+        }
+
+        return;
+    }
+
     Serial.println();
 
     if (gpsPositionUsable) {
@@ -614,6 +903,10 @@ void printTelemetry(
 }
 
 void printDecoderFailure(const Rs41DecodeResult& result) {
+    if (!SERIAL_DECODE_REJECTS) {
+        return;
+    }
+
     Serial.printf(
         "DECODE REJECTED: %s  RSSI=%d dBm  valid=%lu gps=%lu rejected=%lu\n",
         Rs41Decoder::statusText(result.status),
@@ -638,6 +931,7 @@ void setup() {
     trackball.begin();
     powerSettings.begin();
     applyPowerOutputs();
+    touchInput.begin();
     BatteryMonitor::begin();
     localGps.begin(38400);
     frequencyManager.begin();
@@ -645,19 +939,19 @@ void setup() {
 
     Serial.println();
     Serial.println("========================================");
-    Serial.printf(" %s %s - Stage 9 Release Metadata\n", VersionInfo::APP_NAME, VersionInfo::VERSION);
+    Serial.printf(" %s %s - v1.1 Home UI\n", VersionInfo::APP_NAME, VersionInfo::VERSION);
     Serial.println("========================================");
     Serial.println("Press SPACE on the T-Deck keyboard to start.");
-    Serial.println("After startup, SPACE cycles Help -> About -> close.");
-    Serial.println("Pages: Q/W/E/R/T/Y/F/O. Frequency: Z/X step, S scan.");
-    Serial.println("Trackball press cycles Help -> About -> close. Predictions use SondeHub by serial only.");
+    Serial.println("After startup, Home appears. SPACE cycles Help -> Icons -> About -> close.");
+    Serial.println("Pages: Q/W/E/R/T/Y/F/O or touch Home tiles. Y opens Settings. H returns Home.");
+    Serial.println("Touch: Home tiles, Home button and ? button. Predictions use SondeHub by serial only.");
     Serial.println();
 
     waitForSplashContinue();
     waitForKeyboardRelease();
 
-    activePage = DisplayPage::Overview;
-    pageBeforeHelp = DisplayPage::Overview;
+    activePage = DisplayPage::Home;
+    pageBeforeHelp = DisplayPage::Home;
     hasLastTelemetry = false;
     lastGpsUsable = false;
     applyPowerOutputs();
@@ -707,8 +1001,8 @@ void setup() {
     Serial.println("RADIO READY");
     Serial.println("Waiting for RS41 frames...");
 
-    activePage = DisplayPage::Overview;
-    pageBeforeHelp = DisplayPage::Overview;
+    activePage = DisplayPage::Home;
+    pageBeforeHelp = DisplayPage::Home;
     display.resetScreen();
     refreshDisplay(true);
 }
@@ -793,7 +1087,7 @@ void loop() {
 
         const PredictionInfo predictionInfo = onlinePrediction.info();
 
-        if (predictionInfo.configured) {
+        if (SERIAL_PREDICTION_UPDATES && predictionInfo.configured) {
             Serial.printf(
                 "SondeHub prediction: %s",
                 predictionInfo.status

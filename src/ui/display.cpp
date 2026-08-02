@@ -29,7 +29,31 @@ enum class ScreenMode {
 };
 
 ScreenMode currentScreen = ScreenMode::None;
-DisplayPage currentPage = DisplayPage::Overview;
+DisplayPage currentPage = DisplayPage::Home;
+bool pageFullRedraw = true;
+
+struct TextCacheEntry {
+    bool used = false;
+    int16_t x = 0;
+    int16_t y = 0;
+    int16_t width = 0;
+    int16_t height = 0;
+    uint8_t size = 1;
+    uint16_t colour = 0;
+    char text[96] = {};
+};
+
+struct HomeTileCacheEntry {
+    bool used = false;
+    bool selected = false;
+    uint8_t markerState = 0;
+    uint16_t outline = 0;
+    uint16_t textColour = 0;
+};
+
+constexpr uint8_t TEXT_CACHE_SIZE = 96;
+TextCacheEntry textCache[TEXT_CACHE_SIZE];
+HomeTileCacheEntry homeTileCache[8];
 
 enum class OverviewLayoutState {
     Unknown,
@@ -39,6 +63,73 @@ enum class OverviewLayoutState {
 };
 
 OverviewLayoutState overviewLayoutState = OverviewLayoutState::Unknown;
+
+void clearTextCache() {
+    for (uint8_t i = 0; i < TEXT_CACHE_SIZE; ++i) {
+        textCache[i].used = false;
+        textCache[i].text[0] = '\0';
+    }
+}
+
+void clearHomeTileCache() {
+    for (uint8_t i = 0; i < 8; ++i) {
+        homeTileCache[i].used = false;
+    }
+}
+
+bool cachedFieldUnchanged(
+    int16_t x,
+    int16_t y,
+    int16_t width,
+    int16_t height,
+    const char* text,
+    uint16_t colour,
+    uint8_t size
+) {
+    TextCacheEntry* freeEntry = nullptr;
+
+    for (uint8_t i = 0; i < TEXT_CACHE_SIZE; ++i) {
+        TextCacheEntry& entry = textCache[i];
+
+        if (!entry.used) {
+            if (freeEntry == nullptr) {
+                freeEntry = &entry;
+            }
+
+            continue;
+        }
+
+        if (entry.x == x &&
+            entry.y == y &&
+            entry.width == width &&
+            entry.height == height &&
+            entry.size == size) {
+            const bool unchanged =
+                !pageFullRedraw &&
+                entry.colour == colour &&
+                strncmp(entry.text, text, sizeof(entry.text)) == 0;
+
+            entry.colour = colour;
+            strncpy(entry.text, text, sizeof(entry.text) - 1);
+            entry.text[sizeof(entry.text) - 1] = '\0';
+
+            return unchanged;
+        }
+    }
+
+    TextCacheEntry& entry = freeEntry != nullptr ? *freeEntry : textCache[0];
+    entry.used = true;
+    entry.x = x;
+    entry.y = y;
+    entry.width = width;
+    entry.height = height;
+    entry.size = size;
+    entry.colour = colour;
+    strncpy(entry.text, text, sizeof(entry.text) - 1);
+    entry.text[sizeof(entry.text) - 1] = '\0';
+
+    return false;
+}
 
 uint16_t green() {
     return tft.color565(0, 255, 102);
@@ -135,7 +226,25 @@ void rightTextAt(
     tft.setTextDatum(TL_DATUM);
 }
 
+void centreTextInRect(
+    int16_t x,
+    int16_t y,
+    int16_t width,
+    int16_t height,
+    const char* text,
+    uint16_t colour = TFT_WHITE,
+    uint8_t size = 1
+) {
+    setText(size);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(colour, TFT_BLACK);
+    tft.drawString(text, x + width / 2, y + height / 2);
+    tft.setTextDatum(TL_DATUM);
+}
+
 void clearScreen() {
+    clearTextCache();
+    clearHomeTileCache();
     tft.resetViewport();
     tft.fillScreen(TFT_BLACK);
     tft.fillRect(0, 0, SCREEN_W, SCREEN_H, TFT_BLACK);
@@ -164,8 +273,22 @@ void fieldText(
     uint16_t colour = TFT_WHITE,
     uint8_t size = 1
 ) {
+    const char* safeText = text != nullptr ? text : "";
+
+    if (cachedFieldUnchanged(x, y, width, height, safeText, colour, size)) {
+        return;
+    }
+
+    // Always clear the complete assigned field before drawing the new value.
+    // This prevents shorter updates leaving old characters behind anywhere
+    // dynamic text is used.
     clearField(x, y, width, height);
-    textAt(x, y, text, colour, size);
+
+    setText(size);
+    tft.setTextColor(colour, TFT_BLACK);
+    tft.setTextPadding(width);
+    tft.drawString(safeText, x, y);
+    tft.setTextPadding(0);
 }
 
 void fieldRightText(
@@ -177,8 +300,36 @@ void fieldRightText(
     uint16_t colour = TFT_WHITE,
     uint8_t size = 1
 ) {
-    clearField(x - width, y, width, height);
+    const int16_t left = x - width;
+
+    if (cachedFieldUnchanged(left, y, width, height, text, colour, size)) {
+        return;
+    }
+
+    clearField(left, y, width, height);
     rightTextAt(x, y, text, colour, size);
+}
+
+void lineText(
+    int16_t y,
+    const char* text,
+    uint16_t colour = TFT_WHITE,
+    uint8_t size = 1,
+    int16_t x = 10,
+    int16_t width = SCREEN_W - 20
+) {
+    const int16_t height = static_cast<int16_t>(size * 8 + 6);
+    fieldText(x, y, width, height, text, colour, size);
+}
+
+void blankLine(
+    int16_t y,
+    uint8_t size = 1,
+    int16_t x = 10,
+    int16_t width = SCREEN_W - 20
+) {
+    const int16_t height = static_cast<int16_t>(size * 8 + 6);
+    clearField(x, y, width, height);
 }
 
 void fillSlantedBar(
@@ -242,6 +393,8 @@ void drawBatteryIcon(
 
 const char* pageName(DisplayPage page) {
     switch (page) {
+        case DisplayPage::Home:
+            return "Home";
         case DisplayPage::Overview:
             return "Overview";
         case DisplayPage::Sonde:
@@ -253,13 +406,15 @@ const char* pageName(DisplayPage page) {
         case DisplayPage::Logging:
             return "Logging";
         case DisplayPage::Power:
-            return "Power";
+            return "Settings";
         case DisplayPage::Frequency:
             return "Frequency";
         case DisplayPage::Online:
             return "Online";
         case DisplayPage::Help:
             return "Help";
+        case DisplayPage::HelpStatus:
+            return "Icons";
         case DisplayPage::About:
             return "About";
         default:
@@ -267,33 +422,122 @@ const char* pageName(DisplayPage page) {
     }
 }
 
+void drawStatusField(
+    int16_t x,
+    int16_t y,
+    int16_t width,
+    const char* text,
+    uint16_t colour
+) {
+    char padded[5] = "   ";
+
+    if (text != nullptr) {
+        snprintf(padded, sizeof(padded), "%-3.3s", text);
+    }
+
+    if (cachedFieldUnchanged(x, y, width, 13, padded, colour, 1)) {
+        return;
+    }
+
+    // Status slots are intentionally fixed-width and padded. Clear the whole
+    // slot before every changed value so transitions like S-- -> S+ cannot
+    // leave the old trailing dash behind.
+    clearField(x, y, width, 13);
+
+    setText(1);
+    tft.setTextColor(colour, TFT_BLACK);
+    tft.setTextPadding(width);
+    tft.drawString(padded, x, y);
+    tft.setTextPadding(0);
+}
+
+bool sondeGpsAvailable(const AppStatus& status) {
+    return status.counters.gpsFrames > 0 && !status.signalLost;
+}
+
+bool sondeFrameAvailable(const AppStatus& status) {
+    return status.counters.validFrames > 0 && !status.signalLost;
+}
+
+bool frequencyLockedOrValid(const AppStatus& status) {
+    // If we are receiving valid sonde frames on the current tuned frequency,
+    // the frequency is effectively valid even if the frequency manager has
+    // not explicitly latched its locked flag yet.
+    return status.frequency.locked || sondeFrameAvailable(status);
+}
+
+bool sdErrorState(const AppStatus& status) {
+    return !status.logger.available || status.logger.lastError[0] != '\0';
+}
+
 void drawTopStatus(
     const char* gpsStatus,
     const AppStatus& status
 ) {
+    (void)gpsStatus;
+
     char buffer[12];
 
-    clearField(132, 3, 184, 18);
+    // Keep this bar simple: each Home tile that has a dot gets one matching
+    // top-bar slot. Settings has no dot and therefore no top-bar state.
 
-    rightTextAt(180, 6, gpsStatus, TFT_WHITE, 1);
+    // Local GPS: G12/G06/G../G--
+    if (status.localGpsFix) {
+        snprintf(buffer, sizeof(buffer), "G%02u", status.localGpsSats);
+        drawStatusField(96, 6, 28, buffer, green());
+    } else if (status.localGpsPassed > 0) {
+        drawStatusField(96, 6, 28, "G..", amber());
+    } else {
+        drawStatusField(96, 6, 28, "G--", red());
+    }
 
+    // Sonde: S+ full GPS, S? frame without GPS, S-- none.
+    const bool sondeGps = sondeGpsAvailable(status);
+    const bool sondeSeen = status.counters.validFrames > 0;
+
+    if (sondeGps) {
+        drawStatusField(126, 6, 24, "S+", green());
+    } else if (sondeSeen) {
+        drawStatusField(126, 6, 24, "S?", amber());
+    } else {
+        drawStatusField(126, 6, 24, "S--", red());
+    }
+
+    // Recovery: needs both local GPS and sonde GPS.
+    if (status.localGpsFix && sondeGps) {
+        drawStatusField(152, 6, 24, "R+", green());
+    } else if (status.localGpsFix || sondeGps) {
+        drawStatusField(152, 6, 24, "R?", amber());
+    } else {
+        drawStatusField(152, 6, 24, "R--", red());
+    }
+
+    // Logging / SD.
     if (status.logger.enabled) {
-        textAt(185, 6, "LOG", green(), 1);
-    } else if (status.logger.available) {
-        textAt(185, 6, "SD", grey(), 1);
+        drawStatusField(178, 6, 30, "LOG", green());
+    } else if (!sdErrorState(status)) {
+        drawStatusField(178, 6, 30, "SD", amber());
+    } else {
+        drawStatusField(178, 6, 30, "SD!", red());
     }
 
+    // Frequency: locked/valid, scanning, or nothing heard on fixed frequency.
+    if (frequencyLockedOrValid(status)) {
+        drawStatusField(210, 6, 30, "LCK", green());
+    } else if (status.frequency.scanEnabled) {
+        drawStatusField(210, 6, 30, "SCN", amber());
+    } else {
+        drawStatusField(210, 6, 30, "F--", red());
+    }
+
+    // Online: connected, configured but offline, or not configured.
     if (status.network.connected) {
-        textAt(214, 6, "NET", green(), 1);
+        drawStatusField(240, 6, 26, "ONL", green());
+    } else if (status.network.configured) {
+        drawStatusField(240, 6, 26, "W..", amber());
+    } else {
+        drawStatusField(240, 6, 26, "W--", red());
     }
-
-    if (status.displayDimmed) {
-        textAt(222, 6, "DIM", amber(), 1);
-    } else if (status.battery.externalPowerLikely) {
-        textAt(222, 6, "USB", green(), 1);
-    }
-
-    drawBatteryIcon(248, 6, status.battery);
 
     if (status.battery.percent < 0) {
         snprintf(buffer, sizeof(buffer), "--%%");
@@ -301,13 +545,27 @@ void drawTopStatus(
         snprintf(buffer, sizeof(buffer), "%d%%", status.battery.percent);
     }
 
-    rightTextAt(
+    fieldRightText(
         SCREEN_W - 6,
         6,
+        28,
+        13,
         buffer,
         batteryColour(status.battery.percent),
         1
     );
+
+    static int cachedBatteryPercent = -999;
+    static bool cachedExternalPower = false;
+
+    if (pageFullRedraw ||
+        cachedBatteryPercent != status.battery.percent ||
+        cachedExternalPower != status.battery.externalPowerLikely) {
+        clearField(262, 4, 30, 16);
+        drawBatteryIcon(266, 6, status.battery);
+        cachedBatteryPercent = status.battery.percent;
+        cachedExternalPower = status.battery.externalPowerLikely;
+    }
 }
 
 void drawTopBar(
@@ -315,31 +573,40 @@ void drawTopBar(
     const char* gpsStatus,
     const AppStatus& status
 ) {
-    clearField(0, 0, SCREEN_W, 25);
+    if (pageFullRedraw) {
+        clearField(0, 0, SCREEN_W, 25);
+        tft.drawFastHLine(0, 24, SCREEN_W, green());
+    }
 
-    textAt(6, 6, pageName(page), green(), 1);
+    fieldText(6, 6, 88, 13, pageName(page), green(), 1);
     drawTopStatus(gpsStatus, status);
-    tft.drawFastHLine(0, 24, SCREEN_W, green());
 }
 
 void drawFooter(const AppStatus& status) {
-    char buffer[80];
+    char buffer[64];
 
-    clearField(0, SCREEN_H - 25, SCREEN_W, 25);
-    tft.drawFastHLine(0, SCREEN_H - 25, SCREEN_W, grey());
+    if (pageFullRedraw) {
+        clearField(0, SCREEN_H - 25, SCREEN_W, 25);
+        tft.drawFastHLine(0, SCREEN_H - 25, SCREEN_W, grey());
+
+        tft.drawRoundRect(244, SCREEN_H - 22, 44, 18, 4, grey());
+        centreTextInRect(244, SCREEN_H - 20, 44, 14, "Home", grey(), 1);
+
+        tft.drawRoundRect(294, SCREEN_H - 22, 20, 18, 4, green());
+        centreTextInRect(294, SCREEN_H - 20, 20, 14, "?", green(), 1);
+    }
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "OK %lu GPS %lu BAD %lu ABORT %lu PK %d",
+        "OK %lu GPS %lu BAD %lu PK %d",
         static_cast<unsigned long>(status.counters.validFrames),
         static_cast<unsigned long>(status.counters.gpsFrames),
         static_cast<unsigned long>(status.counters.rejectedFrames),
-        static_cast<unsigned long>(status.counters.radioAbortedFrames),
         status.counters.peakRssiDbm
     );
 
-    textAt(6, SCREEN_H - 17, buffer, TFT_WHITE, 1);
+    fieldText(6, SCREEN_H - 17, 232, 13, buffer, TFT_WHITE, 1);
 }
 
 void preparePage(
@@ -347,12 +614,14 @@ void preparePage(
     const char* gpsStatus,
     const AppStatus& status
 ) {
-    if (currentScreen != ScreenMode::Page || currentPage != page) {
+    pageFullRedraw =
+        currentScreen != ScreenMode::Page ||
+        currentPage != page;
+
+    if (pageFullRedraw) {
         clearScreen();
         currentScreen = ScreenMode::Page;
         currentPage = page;
-    } else {
-        clearBody();
     }
 
     drawTopBar(page, gpsStatus, status);
@@ -436,15 +705,15 @@ void labelValue(
     const char* label,
     const char* value
 ) {
-    textAt(x, y, label, green(), 1);
-    textAt(x + 34, y, value, TFT_WHITE, 1);
+    fieldText(x, y, 32, 13, label, green(), 1);
+    fieldText(x + 34, y, 126, 13, value, TFT_WHITE, 1);
 }
 
 void drawNoSondeYet(const NavigationInfo& navigation, const AppStatus& status) {
     char buffer[64];
     char frequency[24];
 
-    textAt(10, 52, "Waiting for RS41 frames", TFT_WHITE, 2);
+    lineText(52, "Waiting for RS41 frames", TFT_WHITE, 2);
 
     formatFrequency(frequency, sizeof(frequency), status.frequency.currentFrequencyHz);
 
@@ -455,7 +724,7 @@ void drawNoSondeYet(const NavigationInfo& navigation, const AppStatus& status) {
         frequency,
         status.frequency.mode
     );
-    textAt(10, 88, buffer, status.frequency.scanEnabled ? amber() : grey(), 1);
+    lineText(88, buffer, status.frequency.scanEnabled ? amber() : grey(), 1);
 
     snprintf(
         buffer,
@@ -464,7 +733,7 @@ void drawNoSondeYet(const NavigationInfo& navigation, const AppStatus& status) {
         static_cast<unsigned>(status.frequency.presetIndex + 1),
         static_cast<unsigned>(status.frequency.presetCount)
     );
-    textAt(10, 108, buffer, grey(), 1);
+    lineText(108, buffer, grey(), 1);
 
     snprintf(
         buffer,
@@ -473,12 +742,12 @@ void drawNoSondeYet(const NavigationInfo& navigation, const AppStatus& status) {
         navigation.localFixValid ? "OK" : "WAIT",
         navigation.localSatellites
     );
-    textAt(10, 136, buffer, navigation.localFixValid ? green() : amber(), 1);
+    lineText(136, buffer, navigation.localFixValid ? green() : amber(), 1);
 
     if (status.frequency.scanEnabled) {
-        textAt(10, 164, "Scanning: S stops, Z/X steps", amber(), 1);
+        lineText(164, "Scanning: S stops, Z/X steps", amber(), 1);
     } else {
-        textAt(10, 164, "F Frequency page, S scan", grey(), 1);
+        lineText(164, "F Frequency page, S scan", grey(), 1);
     }
 }
 
@@ -495,13 +764,13 @@ void drawOverview(
         return;
     }
 
-    textAt(10, 38, telemetry->serial, green(), 2);
+    lineText(38, telemetry->serial, green(), 2, 10, 160);
 
     snprintf(buffer, sizeof(buffer), "%d dBm", telemetry->rssiDbm);
-    rightTextAt(SCREEN_W - 10, 38, buffer, TFT_WHITE, 2);
+    fieldRightText(SCREEN_W - 10, 38, 120, 22, buffer, TFT_WHITE, 2);
 
     snprintf(buffer, sizeof(buffer), "Frame %u", telemetry->frameNumber);
-    textAt(10, 66, buffer, TFT_WHITE, 1);
+    lineText(66, buffer, TFT_WHITE, 1, 10, 120);
 
     snprintf(
         buffer,
@@ -510,7 +779,7 @@ void drawOverview(
         telemetry->satellites,
         telemetry->positionDop
     );
-    rightTextAt(SCREEN_W - 10, 66, buffer, TFT_WHITE, 1);
+    fieldRightText(SCREEN_W - 10, 66, 130, 13, buffer, TFT_WHITE, 1);
 
     tft.drawFastHLine(0, 82, SCREEN_W, grey());
 
@@ -533,8 +802,8 @@ void drawOverview(
         formatDouble(buffer, sizeof(buffer), telemetry->headingDegrees, 0, "deg");
         labelValue(174, 136, "HDG", buffer);
     } else {
-        textAt(10, 98, "Valid RS41 frame", TFT_WHITE, 1);
-        textAt(10, 118, "Waiting for sonde GPS fix", amber(), 1);
+        lineText(98, "Valid RS41 frame", TFT_WHITE, 1);
+        lineText(118, "Waiting for sonde GPS fix", amber(), 1);
     }
 
     if (status.signalLost) {
@@ -544,7 +813,7 @@ void drawOverview(
             "TARGET: LAST SEEN  %.0fs ago",
             status.msSinceLastValidFrame / 1000.0
         );
-        textAt(10, 162, buffer, amber(), 1);
+        lineText(162, buffer, amber(), 1);
     } else {
         snprintf(
             buffer,
@@ -554,7 +823,7 @@ void drawOverview(
             telemetry->gps3CrcValid ? "OK" : "NO",
             telemetry->correctedErrors
         );
-        textAt(10, 162, buffer, green(), 1);
+        lineText(162, buffer, green(), 1);
     }
 
     if (navigation.navValid) {
@@ -569,7 +838,7 @@ void drawOverview(
             navigation.bearingDegrees,
             navigation.elevationDegrees
         );
-        textAt(10, 184, buffer, green(), 1);
+        lineText(184, buffer, green(), 1);
     } else if (!navigation.localFixValid) {
         snprintf(
             buffer,
@@ -577,9 +846,9 @@ void drawOverview(
             "LOCAL GPS WAIT  sats %u",
             navigation.localSatellites
         );
-        textAt(10, 184, buffer, amber(), 1);
+        lineText(184, buffer, amber(), 1);
     } else {
-        textAt(10, 184, "NAV WAIT: sonde GPS", amber(), 1);
+        lineText(184, "NAV WAIT: sonde GPS", amber(), 1);
     }
 }
 
@@ -591,15 +860,21 @@ void drawSondePage(
     char buffer[80];
 
     if (telemetry == nullptr) {
-        textAt(10, 56, "No sonde frame yet", amber(), 2);
+        lineText(56, "No sonde frame yet", amber(), 2);
+        blankLine(92);
+        blankLine(110);
+        blankLine(128);
+        blankLine(146);
+        blankLine(164);
+        blankLine(182);
         return;
     }
 
     snprintf(buffer, sizeof(buffer), "Serial: %s", telemetry->serial);
-    textAt(10, 38, buffer, green(), 1);
+    lineText(38, buffer, green(), 1);
 
     snprintf(buffer, sizeof(buffer), "Frame:  %u", telemetry->frameNumber);
-    textAt(10, 56, buffer, TFT_WHITE, 1);
+    lineText(56, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -608,7 +883,7 @@ void drawSondePage(
         telemetry->rssiDbm,
         status.counters.peakRssiDbm
     );
-    textAt(10, 74, buffer, TFT_WHITE, 1);
+    lineText(74, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -616,7 +891,7 @@ void drawSondePage(
         "FEC:    %u byte(s)",
         telemetry->correctedErrors
     );
-    textAt(10, 92, buffer, TFT_WHITE, 1);
+    lineText(92, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -625,7 +900,7 @@ void drawSondePage(
         telemetry->gps1CrcValid ? "OK" : "NO",
         telemetry->gps3CrcValid ? "OK" : "NO"
     );
-    textAt(10, 110, buffer, TFT_WHITE, 1);
+    lineText(110, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -635,7 +910,7 @@ void drawSondePage(
         telemetry->positionDop,
         telemetry->speedAccuracyMps
     );
-    textAt(10, 128, buffer, TFT_WHITE, 1);
+    lineText(128, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -644,7 +919,7 @@ void drawSondePage(
         telemetry->gpsWeek,
         static_cast<unsigned long>(telemetry->gpsTowMs)
     );
-    textAt(10, 146, buffer, TFT_WHITE, 1);
+    lineText(146, buffer, TFT_WHITE, 1);
 
     if (gpsPositionUsable) {
         snprintf(
@@ -655,9 +930,9 @@ void drawSondePage(
             telemetry->longitude,
             telemetry->altitudeMetres
         );
-        textAt(10, 164, buffer, green(), 1);
+        lineText(164, buffer, green(), 1);
     } else {
-        textAt(10, 164, "Position: no current GPS fix", amber(), 1);
+        lineText(164, "Position: no current GPS fix", amber(), 1);
     }
 
     snprintf(
@@ -668,7 +943,7 @@ void drawSondePage(
         telemetry->horizontalSpeedMps,
         telemetry->headingDegrees
     );
-    textAt(10, 182, buffer, TFT_WHITE, 1);
+    lineText(182, buffer, TFT_WHITE, 1);
 }
 
 void drawNavigationPage(
@@ -685,7 +960,7 @@ void drawNavigationPage(
             sizeof(buffer),
             "Local GPS waiting"
         );
-        textAt(10, 42, buffer, amber(), 2);
+        lineText(42, buffer, amber(), 2);
 
         snprintf(
             buffer,
@@ -694,20 +969,32 @@ void drawNavigationPage(
             navigation.localSatellites,
             navigation.localHdop
         );
-        textAt(10, 76, buffer, TFT_WHITE, 1);
+        lineText(76, buffer, TFT_WHITE, 1);
 
-        textAt(10, 104, "Go outside or wait for GNSS lock.", grey(), 1);
+        lineText(104, "Go outside or wait for GNSS lock.", grey(), 1);
+        blankLine(126, 2);
+        blankLine(160);
+        blankLine(180);
         return;
     }
 
     if (telemetry == nullptr || !navigation.sondeFixValid) {
-        textAt(10, 42, "Waiting for sonde GPS", amber(), 2);
-        textAt(10, 76, "No recovery target yet.", grey(), 1);
+        lineText(42, "Waiting for sonde GPS", amber(), 2);
+        lineText(76, "No recovery target yet.", grey(), 1);
+        blankLine(96, 2);
+        blankLine(126, 2);
+        blankLine(160);
+        blankLine(180);
         return;
     }
 
     if (!navigation.navValid) {
-        textAt(10, 42, "Recovery not valid yet", amber(), 2);
+        lineText(42, "Recovery not valid yet", amber(), 2);
+        blankLine(76);
+        blankLine(96, 2);
+        blankLine(126, 2);
+        blankLine(160);
+        blankLine(180);
         return;
     }
 
@@ -718,24 +1005,24 @@ void drawNavigationPage(
             "Target: LAST SEEN  %.0fs ago",
             status.msSinceLastValidFrame / 1000.0
         );
-        textAt(10, 36, buffer, amber(), 1);
+        lineText(36, buffer, amber(), 1);
     } else {
-        textAt(10, 36, "Target: LIVE", green(), 1);
+        lineText(36, "Target: LIVE", green(), 1);
     }
 
     formatDistance(range, sizeof(range), navigation.distanceMetres);
     snprintf(buffer, sizeof(buffer), "RNG %s", range);
-    textAt(10, 58, buffer, green(), 3);
+    lineText(58, buffer, green(), 3);
 
     snprintf(buffer, sizeof(buffer), "BRG %.0f true", navigation.bearingDegrees);
-    textAt(10, 96, buffer, TFT_WHITE, 2);
+    lineText(96, buffer, TFT_WHITE, 2);
 
     snprintf(buffer, sizeof(buffer), "ELE %+.1f deg", navigation.elevationDegrees);
-    textAt(10, 126, buffer, TFT_WHITE, 2);
+    lineText(126, buffer, TFT_WHITE, 2);
 
     formatDistance(range, sizeof(range), navigation.straightLineMetres);
     snprintf(buffer, sizeof(buffer), "Line %s   Rel alt %+.1f m", range, navigation.relativeAltitudeMetres);
-    textAt(10, 160, buffer, TFT_WHITE, 1);
+    lineText(160, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -744,7 +1031,7 @@ void drawNavigationPage(
         navigation.localSatellites,
         navigation.localHdop
     );
-    textAt(10, 180, buffer, grey(), 1);
+    lineText(180, buffer, grey(), 1);
 }
 
 void drawLocalGpsPage(
@@ -759,7 +1046,7 @@ void drawLocalGpsPage(
         "Fix: %s",
         navigation.localFixValid ? "VALID" : "WAITING"
     );
-    textAt(10, 38, buffer, navigation.localFixValid ? green() : amber(), 2);
+    lineText(38, buffer, navigation.localFixValid ? green() : amber(), 2);
 
     snprintf(
         buffer,
@@ -768,7 +1055,7 @@ void drawLocalGpsPage(
         navigation.localSatellites,
         navigation.localHdop
     );
-    textAt(10, 72, buffer, TFT_WHITE, 1);
+    lineText(72, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -776,7 +1063,7 @@ void drawLocalGpsPage(
         "Age:  %lu ms",
         static_cast<unsigned long>(navigation.localFixAgeMs)
     );
-    textAt(10, 92, buffer, TFT_WHITE, 1);
+    lineText(92, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -784,7 +1071,7 @@ void drawLocalGpsPage(
         "Lat:  %.6f",
         navigation.localLatitude
     );
-    textAt(10, 118, buffer, TFT_WHITE, 1);
+    lineText(118, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -792,7 +1079,7 @@ void drawLocalGpsPage(
         "Lon:  %.6f",
         navigation.localLongitude
     );
-    textAt(10, 138, buffer, TFT_WHITE, 1);
+    lineText(138, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -800,7 +1087,7 @@ void drawLocalGpsPage(
         "Alt:  %.1f m",
         navigation.localAltitudeMetres
     );
-    textAt(10, 158, buffer, TFT_WHITE, 1);
+    lineText(158, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -810,7 +1097,7 @@ void drawLocalGpsPage(
         static_cast<unsigned long>(status.localGpsPassed),
         static_cast<unsigned long>(status.localGpsFailed)
     );
-    textAt(10, 184, buffer, grey(), 1);
+    lineText(184, buffer, grey(), 1);
 }
 
 void drawLoggingPage(const AppStatus& status) {
@@ -822,7 +1109,7 @@ void drawLoggingPage(const AppStatus& status) {
         "SD: %s",
         status.logger.available ? "available" : "not found"
     );
-    textAt(10, 38, buffer, status.logger.available ? green() : amber(), 2);
+    lineText(38, buffer, status.logger.available ? green() : amber(), 2);
 
     snprintf(
         buffer,
@@ -830,7 +1117,7 @@ void drawLoggingPage(const AppStatus& status) {
         "Logging: %s",
         status.logger.enabled ? "ON" : "OFF"
     );
-    textAt(10, 70, buffer, status.logger.enabled ? green() : amber(), 1);
+    lineText(70, buffer, status.logger.enabled ? green() : amber(), 1);
 
     snprintf(
         buffer,
@@ -838,7 +1125,7 @@ void drawLoggingPage(const AppStatus& status) {
         "Frames this boot: %lu",
         static_cast<unsigned long>(status.logger.framesLogged)
     );
-    textAt(10, 88, buffer, TFT_WHITE, 1);
+    lineText(88, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -846,7 +1133,7 @@ void drawLoggingPage(const AppStatus& status) {
         "Sonde: %s",
         status.logger.activeSerial[0] ? status.logger.activeSerial : "--"
     );
-    textAt(10, 106, buffer, TFT_WHITE, 1);
+    lineText(106, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -854,10 +1141,10 @@ void drawLoggingPage(const AppStatus& status) {
         "Track: %s",
         status.logger.activePath[0] ? status.logger.activePath : "--"
     );
-    textAt(10, 124, buffer, TFT_WHITE, 1);
+    lineText(124, buffer, TFT_WHITE, 1);
 
-    textAt(10, 146, "History root: /logs/sondes", grey(), 1);
-    textAt(10, 164, "Index: /logs/index.csv", grey(), 1);
+    lineText(146, "History root: /logs/sondes", grey(), 1);
+    lineText(164, "L toggles logging", grey(), 1);
 
     snprintf(
         buffer,
@@ -865,82 +1152,87 @@ void drawLoggingPage(const AppStatus& status) {
         "Last write: %s",
         status.logger.lastWriteOk ? "OK" : "idle/failed"
     );
-    textAt(10, 182, buffer, status.logger.lastWriteOk ? green() : amber(), 1);
+    lineText(182, buffer, status.logger.lastWriteOk ? green() : amber(), 1);
 
     if (status.logger.lastError[0] != '\0') {
         snprintf(buffer, sizeof(buffer), "Error: %s", status.logger.lastError);
-        textAt(10, 200, buffer, amber(), 1);
+        lineText(200, buffer, amber(), 1);
+    } else {
+        blankLine(200);
     }
 }
 
 void drawPowerPage(const AppStatus& status) {
     char buffer[96];
 
-    fieldText(10, 36, 300, 22, "Display", green(), 2);
+    fieldText(10, 36, 300, 18, "Display", green(), 2);
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Brightness: %-3u%%",
+        "Brightness: %-3u%%  B cycle",
         status.screenBrightnessPercent
     );
-    fieldText(10, 70, 250, 14, buffer, TFT_WHITE, 1);
+    fieldText(10, 66, 300, 13, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Current:    %-3u%% %s",
-        status.effectiveScreenBrightnessPercent,
-        status.displayDimmed ? "(dimmed)" : ""
+        "Auto dim:   %s  P toggle",
+        status.dimmingEnabled ? "ON " : "OFF"
     );
-    fieldText(10, 88, 300, 14, buffer, TFT_WHITE, 1);
+    fieldText(10, 86, 300, 13, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Auto dim:   %s  %lus",
-        status.dimmingEnabled ? "ON " : "OFF",
-        static_cast<unsigned long>(status.dimTimeoutSeconds)
+        "Dim timer:  %lus  next %lus",
+        static_cast<unsigned long>(status.dimTimeoutSeconds),
+        static_cast<unsigned long>(status.secondsUntilDim)
     );
-    fieldText(10, 106, 260, 14, buffer, TFT_WHITE, 1);
+    fieldText(10, 106, 300, 13, buffer, grey(), 1);
 
-    if (status.dimmingEnabled && !status.displayDimmed) {
-        snprintf(
-            buffer,
-            sizeof(buffer),
-            "Dim in:     %-3lus",
-            static_cast<unsigned long>(status.secondsUntilDim)
-        );
-        fieldText(10, 124, 220, 14, buffer, grey(), 1);
-    } else {
-        fieldText(10, 124, 220, 14, "Dim in:     --", grey(), 1);
-    }
-
-    fieldText(10, 150, 300, 22, "Keyboard", green(), 2);
+    fieldText(10, 130, 300, 18, "Input", green(), 2);
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Brightness: %-3u",
+        "Keys:       %-3u%%  K cycle",
         status.keyboardBrightness
     );
-    fieldText(10, 184, 220, 14, buffer, TFT_WHITE, 1);
+    fieldText(10, 160, 300, 13, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Battery:    %.2fV  %-3d%%",
+        "Touch:      %s  D toggle",
+        status.touchAvailable && status.touchEnabled ? "ON " : "OFF"
+    );
+    fieldText(
+        10,
+        180,
+        300,
+        13,
+        buffer,
+        status.touchAvailable && status.touchEnabled ? green() : amber(),
+        1
+    );
+
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "Battery: %.2fV %-3d%%",
         status.battery.voltage,
         status.battery.percent
     );
-    fieldText(10, 202, 260, 14, buffer, grey(), 1);
+    fieldText(10, 200, 300, 13, buffer, grey(), 1);
 }
 
 void drawFrequencyPage(const AppStatus& status) {
     char buffer[96];
     char frequency[24];
 
-    textAt(10, 36, "RS41 Frequency", green(), 2);
+    lineText(36, "RS41 Frequency", green(), 2);
 
     formatFrequency(
         frequency,
@@ -954,19 +1246,28 @@ void drawFrequencyPage(const AppStatus& status) {
         "Current: %s",
         frequency
     );
-    textAt(10, 68, buffer, TFT_WHITE, 2);
+    lineText(68, buffer, TFT_WHITE, 2);
+
+    const char* modeText =
+        frequencyLockedOrValid(status)
+            ? "Locked"
+            : (status.frequency.scanEnabled ? "Scanning" : "Fixed");
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "Mode:    %s",
-        status.frequency.mode
+        "Mode:    %-10s",
+        modeText
     );
-    textAt(
+    fieldText(
         10,
         100,
+        300,
+        13,
         buffer,
-        status.frequency.scanEnabled ? amber() : green(),
+        frequencyLockedOrValid(status)
+            ? green()
+            : (status.frequency.scanEnabled ? amber() : grey()),
         1
     );
 
@@ -977,7 +1278,7 @@ void drawFrequencyPage(const AppStatus& status) {
         static_cast<unsigned>(status.frequency.presetIndex + 1),
         static_cast<unsigned>(status.frequency.presetCount)
     );
-    textAt(10, 120, buffer, TFT_WHITE, 1);
+    lineText(120, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -985,18 +1286,18 @@ void drawFrequencyPage(const AppStatus& status) {
         "Dwell:   %.1fs",
         status.frequency.scanDwellMs / 1000.0
     );
-    textAt(10, 140, buffer, TFT_WHITE, 1);
+    lineText(140, buffer, TFT_WHITE, 1);
 
-    if (status.frequency.locked) {
+    if (frequencyLockedOrValid(status)) {
         snprintf(
             buffer,
             sizeof(buffer),
             "Locked:  %s",
             status.frequency.lockedSerial[0]
                 ? status.frequency.lockedSerial
-                : "RS41"
+                : (sondeFrameAvailable(status) ? "RS41 frame" : "RS41")
         );
-        textAt(10, 160, buffer, green(), 1);
+        lineText(160, buffer, green(), 1);
     } else if (status.frequency.scanEnabled) {
         snprintf(
             buffer,
@@ -1004,7 +1305,9 @@ void drawFrequencyPage(const AppStatus& status) {
             "On freq: %.1fs",
             status.frequency.msOnFrequency / 1000.0
         );
-        textAt(10, 160, buffer, amber(), 1);
+        lineText(160, buffer, amber(), 1);
+    } else {
+        blankLine(160);
     }
 
     if (status.frequency.bestFrequencyHz != 0 &&
@@ -1019,20 +1322,23 @@ void drawFrequencyPage(const AppStatus& status) {
             best,
             status.frequency.bestRssiDbm
         );
-        textAt(10, 182, buffer, grey(), 1);
+        lineText(182, buffer, grey(), 1);
+    } else {
+        blankLine(182);
     }
 
-    textAt(10, 206, "Z/X freq  S scan  F page", grey(), 1);
+    lineText(194, "Z/X freq  S scan", grey(), 1);
+    clearField(10, 207, SCREEN_W - 20, 6);
 }
 
 void drawOnlinePage(const AppStatus& status) {
     char buffer[96];
 
-    textAt(10, 36, "Wi-Fi", green(), 2);
+    lineText(36, "Wi-Fi", green(), 2);
 
     if (!status.network.configured) {
-        textAt(10, 70, "Status: not configured", amber(), 1);
-        textAt(10, 92, "Edit src/config/wifi_config.h", grey(), 1);
+        lineText(70, "Status: not configured", amber(), 1);
+        lineText(92, "Edit src/config/wifi_config.h", grey(), 1);
     } else {
         snprintf(
             buffer,
@@ -1040,13 +1346,7 @@ void drawOnlinePage(const AppStatus& status) {
             "Status: %s",
             status.network.status
         );
-        textAt(
-            10,
-            70,
-            buffer,
-            status.network.connected ? green() : amber(),
-            1
-        );
+        lineText(70, buffer, status.network.connected ? green() : amber(), 1);
 
         snprintf(
             buffer,
@@ -1055,10 +1355,10 @@ void drawOnlinePage(const AppStatus& status) {
             status.network.ipAddress[0] ? status.network.ipAddress : "--",
             static_cast<long>(status.network.rssiDbm)
         );
-        textAt(10, 90, buffer, TFT_WHITE, 1);
+        lineText(90, buffer, TFT_WHITE, 1);
     }
 
-    textAt(10, 120, "SondeHub prediction", green(), 2);
+    lineText(120, "SondeHub prediction", green(), 2);
 
     snprintf(
         buffer,
@@ -1066,17 +1366,15 @@ void drawOnlinePage(const AppStatus& status) {
         "Status: %s",
         status.prediction.status
     );
-    textAt(
-        10,
-        152,
-        buffer,
-        status.prediction.available ? green() : amber(),
-        1
-    );
+    lineText(152, buffer, status.prediction.available ? green() : amber(), 1);
 
     if (!status.prediction.available) {
-        textAt(10, 174, "Reads /predictions?vehicles=<serial>", grey(), 1);
-        textAt(10, 192, "No SondeDeck upload is performed.", grey(), 1);
+        lineText(174, "Reads /predictions?vehicles=<serial>", grey(), 1);
+        lineText(192, "No SondeDeck upload is performed.", grey(), 1);
+
+        // Keep clearing inside the page body only. The footer divider starts
+        // at y=215, so do not use a normal blankLine() here.
+        clearField(10, 207, SCREEN_W - 20, 6);
         return;
     }
 
@@ -1088,7 +1386,7 @@ void drawOnlinePage(const AppStatus& status) {
         status.prediction.latitude,
         status.prediction.longitude
     );
-    textAt(10, 174, buffer, TFT_WHITE, 1);
+    lineText(174, buffer, TFT_WHITE, 1);
 
     if (status.prediction.targetNavValid) {
         char range[16];
@@ -1106,9 +1404,9 @@ void drawOnlinePage(const AppStatus& status) {
             range,
             status.prediction.targetBearingDegrees
         );
-        textAt(10, 192, buffer, green(), 1);
+        lineText(192, buffer, green(), 1);
     } else {
-        textAt(10, 192, "Prediction range waits for local GPS.", grey(), 1);
+        lineText(192, "Prediction range waits for local GPS.", grey(), 1);
     }
 
     snprintf(
@@ -1117,23 +1415,222 @@ void drawOnlinePage(const AppStatus& status) {
         "Time: %s",
         status.prediction.predictionTime[0] ? status.prediction.predictionTime : "--"
     );
-    textAt(10, 210, buffer, grey(), 1);
+
+    // Compact field kept above the footer bar.
+    fieldText(10, 204, SCREEN_W - 20, 9, buffer, grey(), 1);
+}
+
+
+struct HomeTileSpec {
+    DisplayPage page;
+    const char* label;
+    const char* key;
+};
+
+const HomeTileSpec homeTiles[] = {
+    {DisplayPage::Overview, "Overview", "Q"},
+    {DisplayPage::Sonde, "Sonde", "W"},
+    {DisplayPage::Navigation, "Recovery", "E"},
+    {DisplayPage::LocalGps, "Local GPS", "R"},
+    {DisplayPage::Logging, "Logging", "T"},
+    {DisplayPage::Power, "Settings", "Y"},
+    {DisplayPage::Frequency, "Frequency", "F"},
+    {DisplayPage::Online, "Online", "O"},
+};
+
+void drawHomeTile(
+    uint8_t index,
+    uint8_t selectedIndex,
+    const AppStatus& status
+) {
+    constexpr int16_t tileW = 74;
+    constexpr int16_t tileH = 70;
+    constexpr int16_t startX = 6;
+    constexpr int16_t startY = 38;
+    constexpr int16_t gapX = 5;
+    constexpr int16_t gapY = 9;
+
+    const uint8_t col = index % 4;
+    const uint8_t row = index / 4;
+    const int16_t x = startX + col * (tileW + gapX);
+    const int16_t y = startY + row * (tileH + gapY);
+
+    uint16_t outline = index == selectedIndex ? green() : darkGrey();
+    uint16_t text = index == selectedIndex ? green() : TFT_WHITE;
+
+    if (homeTiles[index].page == DisplayPage::Online &&
+        status.network.configured &&
+        !status.network.connected) {
+        outline = index == selectedIndex ? amber() : darkGrey();
+    }
+
+    const bool sondeGpsGreen = sondeGpsAvailable(status);
+    const bool sondeHeard = status.counters.validFrames > 0;
+    const bool recoveryGreen = status.localGpsFix && sondeGpsGreen;
+    const bool loggingGreen = status.logger.enabled;
+    const bool frequencyGreen = frequencyLockedOrValid(status);
+    const bool overviewGreen =
+        sondeGpsGreen &&
+        recoveryGreen &&
+        status.localGpsFix &&
+        frequencyGreen;
+
+    uint8_t markerState = 0;
+    uint16_t markerColour = green();
+
+    switch (homeTiles[index].page) {
+        case DisplayPage::Overview:
+            markerState = overviewGreen ? 1 : 2;
+            markerColour = overviewGreen ? green() : amber();
+            break;
+
+        case DisplayPage::Sonde:
+            if (sondeGpsGreen) {
+                markerState = 1;
+                markerColour = green();
+            } else if (sondeHeard) {
+                markerState = 2;
+                markerColour = amber();
+            } else {
+                markerState = 3;
+                markerColour = red();
+            }
+            break;
+
+        case DisplayPage::Navigation:
+            if (recoveryGreen) {
+                markerState = 1;
+                markerColour = green();
+            } else if (status.localGpsFix || sondeGpsGreen) {
+                markerState = 2;
+                markerColour = amber();
+            } else {
+                markerState = 3;
+                markerColour = red();
+            }
+            break;
+
+        case DisplayPage::LocalGps:
+            markerState = status.localGpsFix ? 1 : 3;
+            markerColour = status.localGpsFix ? green() : red();
+            break;
+
+        case DisplayPage::Logging:
+            if (status.logger.enabled) {
+                markerState = 1;
+                markerColour = green();
+            } else if (status.logger.available && status.logger.lastError[0] == '\0') {
+                markerState = 2;
+                markerColour = amber();
+            } else {
+                markerState = 3;
+                markerColour = red();
+            }
+            break;
+
+        case DisplayPage::Power:
+            markerState = 0;
+            break;
+
+        case DisplayPage::Frequency:
+            if (frequencyLockedOrValid(status)) {
+                markerState = 1;
+                markerColour = green();
+            } else if (status.frequency.scanEnabled) {
+                markerState = 2;
+                markerColour = amber();
+            } else {
+                markerState = 3;
+                markerColour = red();
+            }
+            break;
+
+        case DisplayPage::Online:
+            if (status.network.connected) {
+                markerState = 1;
+                markerColour = green();
+            } else if (status.network.configured) {
+                markerState = 2;
+                markerColour = amber();
+            } else {
+                markerState = 3;
+                markerColour = red();
+            }
+            break;
+
+        default:
+            markerState = 0;
+            break;
+    }
+
+    HomeTileCacheEntry& cache = homeTileCache[index];
+    const bool selected = index == selectedIndex;
+
+    if (!pageFullRedraw &&
+        cache.used &&
+        cache.selected == selected &&
+        cache.markerState == markerState &&
+        cache.outline == outline &&
+        cache.textColour == text) {
+        return;
+    }
+
+    cache.used = true;
+    cache.selected = selected;
+    cache.markerState = markerState;
+    cache.outline = outline;
+    cache.textColour = text;
+
+    tft.fillRect(x, y, tileW, tileH, TFT_BLACK);
+    tft.drawRoundRect(x, y, tileW, tileH, 6, outline);
+
+    centreTextInRect(x, y + 13, tileW, 16, homeTiles[index].key, outline, 2);
+    centreTextInRect(x, y + 39, tileW, 12, homeTiles[index].label, text, 1);
+
+    if (markerState != 0) {
+        tft.fillCircle(x + tileW - 10, y + 10, 3, markerColour);
+    }
+}
+
+void drawHomePage(
+    const AppStatus& status,
+    uint8_t selectedIndex
+) {
+    if (selectedIndex >= 8) {
+        selectedIndex = 0;
+    }
+
+    for (uint8_t i = 0; i < 8; ++i) {
+        drawHomeTile(i, selectedIndex, status);
+    }
+
+    fieldText(8, 198, 220, 13, "Tap tile | U/I | Enter", grey(), 1);
 }
 
 void drawHelpPage() {
-    textAt(10, 34, "Help", green(), 2);
+    lineText(42, "Q Overview    W Sonde", TFT_WHITE, 1);
+    lineText(60, "E Recovery    R Local GPS", TFT_WHITE, 1);
+    lineText(78, "T Logging     Y Settings", TFT_WHITE, 1);
+    lineText(96, "F Frequency   O Online", TFT_WHITE, 1);
 
-    textAt(10, 58, "Q Overview    W Sonde", TFT_WHITE, 1);
-    textAt(10, 76, "E Recovery    R Local GPS", TFT_WHITE, 1);
-    textAt(10, 94, "T Logging     Y Power", TFT_WHITE, 1);
-    textAt(10, 112, "F Frequency   O Online", TFT_WHITE, 1);
+    lineText(120, "U/I Page      Z/X Frequency", TFT_WHITE, 1);
+    lineText(138, "S Scan on/off L Log", TFT_WHITE, 1);
+    lineText(156, "B Screen      K Keyboard", TFT_WHITE, 1);
+    lineText(174, "P Auto dim    A Reset", TFT_WHITE, 1);
+    lineText(192, "D Touch on/off  H Home", TFT_WHITE, 1);
+}
 
-    textAt(10, 136, "U/I Page      Z/X Frequency", TFT_WHITE, 1);
-    textAt(10, 154, "S Scan on/off L Log", TFT_WHITE, 1);
-    textAt(10, 172, "B Screen      K Keyboard", TFT_WHITE, 1);
-    textAt(10, 190, "P Auto dim    A Reset", TFT_WHITE, 1);
+void drawHelpStatusPage() {
+    lineText(38, "Top bar icons", green(), 2);
 
-    textAt(10, 214, "Space: About", grey(), 1);
+    lineText(66, "G12/G06 local GPS sats", TFT_WHITE, 1);
+    lineText(84, "G.. GPS data/no fix  G-- none", TFT_WHITE, 1);
+    lineText(104, "S+ sonde GPS  S? no GPS", TFT_WHITE, 1);
+    lineText(122, "S-- no sonde", TFT_WHITE, 1);
+    lineText(140, "R+ recoverable  R? missing one", TFT_WHITE, 1);
+    lineText(158, "LOG logging  SD idle  SD! error", TFT_WHITE, 1);
+    lineText(176, "LCK valid freq  SCN scan  F-- none", TFT_WHITE, 1);
+    lineText(194, "ONL online  W.. waiting  W-- off", TFT_WHITE, 1);
 }
 
 void drawAboutPage() {
@@ -1146,7 +1643,7 @@ void drawAboutPage() {
         VersionInfo::SPLASH_NAME,
         VersionInfo::VERSION
     );
-    textAt(10, 34, buffer, green(), 2);
+    lineText(38, buffer, green(), 2);
 
     snprintf(
         buffer,
@@ -1155,7 +1652,7 @@ void drawAboutPage() {
         VersionInfo::APP_NAME,
         VersionInfo::AUTHOR
     );
-    textAt(10, 66, buffer, TFT_WHITE, 1);
+    lineText(66, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -1163,7 +1660,7 @@ void drawAboutPage() {
         "Hardware: %s",
         VersionInfo::HARDWARE
     );
-    textAt(10, 90, buffer, TFT_WHITE, 1);
+    lineText(90, buffer, TFT_WHITE, 1);
 
     snprintf(
         buffer,
@@ -1172,15 +1669,12 @@ void drawAboutPage() {
         VersionInfo::RADIO,
         VersionInfo::SONDE_SUPPORT
     );
-    textAt(10, 108, buffer, TFT_WHITE, 1);
+    lineText(108, buffer, TFT_WHITE, 1);
 
-    textAt(10, 132, "Features:", green(), 1);
-    textAt(10, 150, "Recovery navigation + SD logging", TFT_WHITE, 1);
-    textAt(10, 168, "Frequency presets + RS41 scan", TFT_WHITE, 1);
-    textAt(10, 186, "SondeHub predictions: read-only", TFT_WHITE, 1);
-    textAt(10, 204, "No handheld telemetry uploads", grey(), 1);
-    textAt(226, 222, "Space closes", grey(), 1);
+    // Keep About short. Documentation covers the feature list.
+    clearField(10, 132, SCREEN_W - 20, 76);
 }
+
 }
 
 bool SondeDisplay::begin() {
@@ -1199,7 +1693,7 @@ bool SondeDisplay::begin() {
     pinMode(BoardPins::DISPLAY_BACKLIGHT, OUTPUT);
     ledcSetup(BACKLIGHT_PWM_CHANNEL, BACKLIGHT_PWM_FREQ, BACKLIGHT_PWM_BITS);
     ledcAttachPin(BoardPins::DISPLAY_BACKLIGHT, BACKLIGHT_PWM_CHANNEL);
-    writeBacklight(80);
+    writeBacklight(75);
 
     tft.init();
     tft.setRotation(1);
@@ -1211,6 +1705,14 @@ bool SondeDisplay::begin() {
 }
 
 void SondeDisplay::setBrightnessPercent(uint8_t percent) {
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    // Re-assert the PWM duty so the visible backlight always matches the
+    // setting shown on the Settings page after a B-key step.
+    writeBacklight(percent);
+    delay(1);
     writeBacklight(percent);
 }
 
@@ -1220,8 +1722,11 @@ void SondeDisplay::resetScreen() {
     }
 
     currentScreen = ScreenMode::None;
-    currentPage = DisplayPage::Overview;
+    currentPage = DisplayPage::Home;
     overviewLayoutState = OverviewLayoutState::Unknown;
+    pageFullRedraw = true;
+    clearTextCache();
+    clearHomeTileCache();
 
     tft.resetViewport();
     tft.setAddrWindow(0, 0, SCREEN_W, SCREEN_H);
@@ -1272,9 +1777,9 @@ void SondeDisplay::showBoot(
 
     clearScreen();
 
-    textAt(10, 70, title, green(), 2);
-    textAt(10, 102, "RS41-SG frequency manager", TFT_WHITE, 1);
-    textAt(10, 122, status, grey(), 1);
+    lineText(70, title, green(), 2);
+    lineText(102, "RS41-SG frequency manager", TFT_WHITE, 1);
+    lineText(122, status, grey(), 1);
 
     currentScreen = ScreenMode::Boot;
 }
@@ -1284,7 +1789,8 @@ void SondeDisplay::showPage(
     const SondeTelemetry* telemetry,
     bool gpsPositionUsable,
     const NavigationInfo& navigation,
-    const AppStatus& status
+    const AppStatus& status,
+    uint8_t homeSelection
 ) {
     if (!ready_) {
         return;
@@ -1292,12 +1798,6 @@ void SondeDisplay::showPage(
 
     const char* gpsStatus =
         gpsPositionUsable ? "GPS OK" : "NO GPS";
-
-    if (page == DisplayPage::Help) {
-        gpsStatus = "HELP";
-    } else if (page == DisplayPage::About) {
-        gpsStatus = "ABOUT";
-    }
 
     if (page == DisplayPage::Overview) {
         OverviewLayoutState newOverviewState =
@@ -1323,6 +1823,10 @@ void SondeDisplay::showPage(
     preparePage(page, gpsStatus, status);
 
     switch (page) {
+        case DisplayPage::Home:
+            drawHomePage(status, homeSelection);
+            break;
+
         case DisplayPage::Overview:
             drawOverview(telemetry, gpsPositionUsable, navigation, status);
             break;
@@ -1359,10 +1863,16 @@ void SondeDisplay::showPage(
             drawHelpPage();
             break;
 
+        case DisplayPage::HelpStatus:
+            drawHelpStatusPage();
+            break;
+
         case DisplayPage::About:
             drawAboutPage();
             break;
     }
+
+    pageFullRedraw = false;
 }
 
 void SondeDisplay::showDecodeFailure(
@@ -1379,17 +1889,15 @@ void SondeDisplay::showDecodeFailure(
     if (currentScreen != ScreenMode::Reject) {
         clearScreen();
         currentScreen = ScreenMode::Reject;
-    } else {
-        clearBody();
     }
 
     drawTopBar(DisplayPage::Overview, "REJECT", status);
 
-    textAt(10, 58, "Decode rejected", amber(), 2);
-    textAt(10, 92, reason, TFT_WHITE, 1);
+    lineText(58, "Decode rejected", amber(), 2);
+    lineText(92, reason, TFT_WHITE, 1);
 
     snprintf(buffer, sizeof(buffer), "RSSI %d dBm", rssiDbm);
-    textAt(10, 116, buffer, grey(), 1);
+    lineText(116, buffer, grey(), 1);
 
     drawFooter(status);
 }

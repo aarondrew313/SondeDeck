@@ -1,6 +1,7 @@
 #pragma once
 
 enum class DisplayPage {
+    Home,
     Overview,
     Sonde,
     Navigation,
@@ -10,11 +11,25 @@ enum class DisplayPage {
     Frequency,
     Online,
     Help,
+    HelpStatus,
     About
 };
 
+inline bool isMainDisplayPage(DisplayPage page) {
+    return page == DisplayPage::Overview ||
+           page == DisplayPage::Sonde ||
+           page == DisplayPage::Navigation ||
+           page == DisplayPage::LocalGps ||
+           page == DisplayPage::Logging ||
+           page == DisplayPage::Power ||
+           page == DisplayPage::Frequency ||
+           page == DisplayPage::Online;
+}
+
 inline DisplayPage nextDisplayPage(DisplayPage page) {
     switch (page) {
+        case DisplayPage::Home:
+            return DisplayPage::Overview;
         case DisplayPage::Overview:
             return DisplayPage::Sonde;
         case DisplayPage::Sonde:
@@ -32,14 +47,17 @@ inline DisplayPage nextDisplayPage(DisplayPage page) {
         case DisplayPage::Online:
             return DisplayPage::Overview;
         case DisplayPage::Help:
+        case DisplayPage::HelpStatus:
         case DisplayPage::About:
         default:
-            return DisplayPage::Overview;
+            return DisplayPage::Home;
     }
 }
 
 inline DisplayPage previousDisplayPage(DisplayPage page) {
     switch (page) {
+        case DisplayPage::Home:
+            return DisplayPage::Online;
         case DisplayPage::Overview:
             return DisplayPage::Online;
         case DisplayPage::Sonde:
@@ -57,8 +75,9 @@ inline DisplayPage previousDisplayPage(DisplayPage page) {
         case DisplayPage::Online:
             return DisplayPage::Frequency;
         case DisplayPage::Help:
+        case DisplayPage::HelpStatus:
         case DisplayPage::About:
         default:
-            return DisplayPage::Overview;
+            return DisplayPage::Home;
     }
 }

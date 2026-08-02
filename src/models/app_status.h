@@ -18,7 +18,7 @@ struct AppCounters {
 };
 
 struct AppStatus {
-    DisplayPage activePage = DisplayPage::Overview;
+    DisplayPage activePage = DisplayPage::Home;
     AppCounters counters;
     LoggerStatus logger;
     BatteryState battery;
@@ -29,14 +29,19 @@ struct AppStatus {
     uint32_t localGpsChars = 0;
     uint32_t localGpsPassed = 0;
     uint32_t localGpsFailed = 0;
+    bool localGpsFix = false;
+    uint8_t localGpsSats = 0;
 
-    uint8_t screenBrightnessPercent = 80;
-    uint8_t effectiveScreenBrightnessPercent = 80;
+    uint8_t screenBrightnessPercent = 75;
+    uint8_t effectiveScreenBrightnessPercent = 75;
     uint8_t keyboardBrightness = 0;
+    bool tftEnabled = true;
+    bool touchAvailable = false;
+    bool touchEnabled = true;
     bool displayDimmed = false;
-    bool dimmingEnabled = true;
+    bool dimmingEnabled = false;
     uint32_t dimTimeoutSeconds = 60;
-    uint32_t secondsUntilDim = 60;
+    uint32_t secondsUntilDim = 0;
 
     NetworkStatus network;
     PredictionInfo prediction;

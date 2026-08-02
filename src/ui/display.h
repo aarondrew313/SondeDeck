@@ -27,7 +27,8 @@ public:
         const SondeTelemetry* telemetry,
         bool gpsPositionUsable,
         const NavigationInfo& navigation,
-        const AppStatus& status
+        const AppStatus& status,
+        uint8_t homeSelection = 0
     );
 
     void showDecodeFailure(
