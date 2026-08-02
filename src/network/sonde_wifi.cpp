@@ -13,6 +13,10 @@ void safeCopy(char* destination, size_t destinationLength, const char* source) {
         return;
     }
 
+    if (source == nullptr) {
+        source = "";
+    }
+
     strncpy(destination, source, destinationLength - 1);
     destination[destinationLength - 1] = '\0';
 }
@@ -38,11 +42,16 @@ const char* wifiStatusText(wl_status_t status) {
 }
 
 void SondeWifi::begin() {
-    configured_ =
-        SONDEDECK_WIFI_SSID != nullptr &&
-        SONDEDECK_WIFI_SSID[0] != '\0';
+    if (!preferencesOpen_) {
+        preferencesOpen_ = preferences_.begin("sondewifi", false);
+    }
+
+    loadCredentials();
+
+    configured_ = ssid_[0] != '\0';
 
     if (!configured_) {
+        WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
         connecting_ = false;
         return;
@@ -81,6 +90,37 @@ bool SondeWifi::connected() const {
     return configured_ && WiFi.status() == WL_CONNECTED;
 }
 
+const char* SondeWifi::ssid() const {
+    return ssid_;
+}
+
+const char* SondeWifi::password() const {
+    return password_;
+}
+
+void SondeWifi::setCredentials(const char* ssid, const char* password) {
+    safeCopy(ssid_, sizeof(ssid_), ssid);
+    safeCopy(password_, sizeof(password_), password);
+
+    configured_ = ssid_[0] != '\0';
+    connecting_ = false;
+
+    if (preferencesOpen_) {
+        preferences_.putString("ssid", ssid_);
+        preferences_.putString("pass", password_);
+    }
+
+    if (!configured_) {
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        return;
+    }
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(true);
+    startConnection();
+}
+
 NetworkStatus SondeWifi::status() const {
     NetworkStatus value;
 
@@ -88,6 +128,8 @@ NetworkStatus SondeWifi::status() const {
     value.connected = connected();
     value.connecting = configured_ && !value.connected && connecting_;
     value.lastAttemptMs = lastAttemptMs_;
+
+    safeCopy(value.ssid, sizeof(value.ssid), ssid_);
 
     if (!configured_) {
         safeCopy(value.status, sizeof(value.status), "not configured");
@@ -115,11 +157,30 @@ NetworkStatus SondeWifi::status() const {
     return value;
 }
 
+void SondeWifi::loadCredentials() {
+    ssid_[0] = '\0';
+    password_[0] = '\0';
+
+    if (preferencesOpen_) {
+        const String storedSsid = preferences_.getString("ssid", "");
+        const String storedPass = preferences_.getString("pass", "");
+
+        if (storedSsid.length() > 0) {
+            safeCopy(ssid_, sizeof(ssid_), storedSsid.c_str());
+            safeCopy(password_, sizeof(password_), storedPass.c_str());
+            return;
+        }
+    }
+
+    safeCopy(ssid_, sizeof(ssid_), SONDEDECK_WIFI_SSID);
+    safeCopy(password_, sizeof(password_), SONDEDECK_WIFI_PASSWORD);
+}
+
 void SondeWifi::startConnection() {
     lastAttemptMs_ = millis();
     connecting_ = true;
 
     WiFi.disconnect(false, true);
     delay(20);
-    WiFi.begin(SONDEDECK_WIFI_SSID, SONDEDECK_WIFI_PASSWORD);
+    WiFi.begin(ssid_, password_);
 }

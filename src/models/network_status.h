@@ -10,6 +10,7 @@ struct NetworkStatus {
     int32_t rssiDbm = 0;
     uint32_t lastAttemptMs = 0;
 
+    char ssid[33] = "";
     char ipAddress[20] = "";
     char status[32] = "";
 };

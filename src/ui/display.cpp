@@ -25,6 +25,7 @@ enum class ScreenMode {
     Splash,
     Boot,
     Page,
+    WebMode,
     Reject
 };
 
@@ -289,6 +290,32 @@ void fieldText(
     tft.setTextPadding(width);
     tft.drawString(safeText, x, y);
     tft.setTextPadding(0);
+}
+
+void centreFieldText(
+    int16_t x,
+    int16_t y,
+    int16_t width,
+    int16_t height,
+    const char* text,
+    uint16_t colour = TFT_WHITE,
+    uint8_t size = 1
+) {
+    const char* safeText = text != nullptr ? text : "";
+
+    if (cachedFieldUnchanged(x, y, width, height, safeText, colour, size)) {
+        return;
+    }
+
+    clearField(x, y, width, height);
+
+    setText(size);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(colour, TFT_BLACK);
+    tft.setTextPadding(width);
+    tft.drawString(safeText, x + width / 2, y + height / 2);
+    tft.setTextPadding(0);
+    tft.setTextDatum(TL_DATUM);
 }
 
 void fieldRightText(
@@ -583,30 +610,26 @@ void drawTopBar(
 }
 
 void drawFooter(const AppStatus& status) {
-    char buffer[64];
+    (void)status;
 
-    if (pageFullRedraw) {
-        clearField(0, SCREEN_H - 25, SCREEN_W, 25);
-        tft.drawFastHLine(0, SCREEN_H - 25, SCREEN_W, grey());
-
-        tft.drawRoundRect(244, SCREEN_H - 22, 44, 18, 4, grey());
-        centreTextInRect(244, SCREEN_H - 20, 44, 14, "Home", grey(), 1);
-
-        tft.drawRoundRect(294, SCREEN_H - 22, 20, 18, 4, green());
-        centreTextInRect(294, SCREEN_H - 20, 20, 14, "?", green(), 1);
+    if (!pageFullRedraw) {
+        return;
     }
 
-    snprintf(
-        buffer,
-        sizeof(buffer),
-        "OK %lu GPS %lu BAD %lu PK %d",
-        static_cast<unsigned long>(status.counters.validFrames),
-        static_cast<unsigned long>(status.counters.gpsFrames),
-        static_cast<unsigned long>(status.counters.rejectedFrames),
-        status.counters.peakRssiDbm
-    );
+    // Bottom bar is now a simple touch/control bar. The counters that used to
+    // live here are already available on the relevant pages, so avoid using
+    // this space for constantly changing debug/status text.
+    clearField(0, SCREEN_H - 25, SCREEN_W, 25);
+    tft.drawFastHLine(0, SCREEN_H - 25, SCREEN_W, grey());
 
-    fieldText(6, SCREEN_H - 17, 232, 13, buffer, TFT_WHITE, 1);
+    tft.drawRoundRect(8, SCREEN_H - 22, 54, 18, 4, green());
+    centreTextInRect(8, SCREEN_H - 20, 54, 14, "Web", green(), 1);
+
+    tft.drawRoundRect(132, SCREEN_H - 22, 56, 18, 4, green());
+    centreTextInRect(132, SCREEN_H - 20, 56, 14, "Home", green(), 1);
+
+    tft.drawRoundRect(258, SCREEN_H - 22, 54, 18, 4, green());
+    centreTextInRect(258, SCREEN_H - 20, 54, 14, "Info", green(), 1);
 }
 
 void preparePage(
@@ -1210,7 +1233,7 @@ void drawPowerPage(const AppStatus& status) {
     );
     fieldText(
         10,
-        180,
+        178,
         300,
         13,
         buffer,
@@ -1221,11 +1244,13 @@ void drawPowerPage(const AppStatus& status) {
     snprintf(
         buffer,
         sizeof(buffer),
-        "Battery: %.2fV %-3d%%",
-        status.battery.voltage,
-        status.battery.percent
+        "Web UI:    %s  M start",
+        status.webModeEnabled ? "ON " : "OFF"
     );
-    fieldText(10, 200, 300, 13, buffer, grey(), 1);
+    fieldText(10, 196, 300, 13, buffer, status.webModeEnabled ? green() : TFT_WHITE, 1);
+
+    // Battery state is already visible in the top bar.
+    // Do not clear below y=200 because the footer divider starts at y=215.
 }
 
 void drawFrequencyPage(const AppStatus& status) {
@@ -1328,7 +1353,6 @@ void drawFrequencyPage(const AppStatus& status) {
     }
 
     lineText(194, "Z/X freq  S scan", grey(), 1);
-    clearField(10, 207, SCREEN_W - 20, 6);
 }
 
 void drawOnlinePage(const AppStatus& status) {
@@ -1336,18 +1360,33 @@ void drawOnlinePage(const AppStatus& status) {
 
     lineText(36, "Wi-Fi", green(), 2);
 
-    if (!status.network.configured) {
-        lineText(70, "Status: not configured", amber(), 1);
-        lineText(92, "Edit src/config/wifi_config.h", grey(), 1);
-    } else {
-        snprintf(
-            buffer,
-            sizeof(buffer),
-            "Status: %s",
-            status.network.status
-        );
-        lineText(70, buffer, status.network.connected ? green() : amber(), 1);
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "Status: %s",
+        status.network.status
+    );
+    fieldText(
+        10,
+        66,
+        300,
+        13,
+        buffer,
+        status.network.connected
+            ? green()
+            : (status.network.configured ? amber() : red()),
+        1
+    );
 
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "SSID: %s",
+        status.network.ssid[0] ? status.network.ssid : "--"
+    );
+    fieldText(10, 84, 300, 13, buffer, TFT_WHITE, 1);
+
+    if (status.network.connected) {
         snprintf(
             buffer,
             sizeof(buffer),
@@ -1355,10 +1394,33 @@ void drawOnlinePage(const AppStatus& status) {
             status.network.ipAddress[0] ? status.network.ipAddress : "--",
             static_cast<long>(status.network.rssiDbm)
         );
-        lineText(90, buffer, TFT_WHITE, 1);
+    } else {
+        snprintf(buffer, sizeof(buffer), "IP: --");
     }
 
-    lineText(120, "SondeHub prediction", green(), 2);
+    fieldText(10, 102, 300, 13, buffer, grey(), 1);
+
+    lineText(122, "N SSID   C Password", grey(), 1);
+
+    if (status.wifiEditActive) {
+        snprintf(
+            buffer,
+            sizeof(buffer),
+            "Editing %s   Mode: %s",
+            status.wifiEditField,
+            status.wifiEditMode
+        );
+        fieldText(10, 146, 300, 13, buffer, green(), 1);
+
+        snprintf(buffer, sizeof(buffer), "> %s", status.wifiEditValue);
+        fieldText(10, 164, 300, 13, buffer, TFT_WHITE, 1);
+
+        lineText(184, "Enter/Ball save  Backspace del", grey(), 1);
+        lineText(202, "Space ABC/123/SYM  Q/P=0", grey(), 1);
+        return;
+    }
+
+    lineText(146, "SondeHub prediction", green(), 2);
 
     snprintf(
         buffer,
@@ -1366,60 +1428,31 @@ void drawOnlinePage(const AppStatus& status) {
         "Status: %s",
         status.prediction.status
     );
-    lineText(152, buffer, status.prediction.available ? green() : amber(), 1);
+    fieldText(
+        10,
+        176,
+        300,
+        13,
+        buffer,
+        status.prediction.available ? green() : amber(),
+        1
+    );
 
     if (!status.prediction.available) {
-        lineText(174, "Reads /predictions?vehicles=<serial>", grey(), 1);
-        lineText(192, "No SondeDeck upload is performed.", grey(), 1);
-
-        // Keep clearing inside the page body only. The footer divider starts
-        // at y=215, so do not use a normal blankLine() here.
-        clearField(10, 207, SCREEN_W - 20, 6);
+        lineText(194, "Read-only predictions. No upload.", grey(), 1);
         return;
     }
 
     snprintf(
         buffer,
         sizeof(buffer),
-        "%s %.6f, %.6f",
+        "%s %.5f, %.5f",
         status.prediction.landed ? "Landed:" : "Pred:",
         status.prediction.latitude,
         status.prediction.longitude
     );
-    lineText(174, buffer, TFT_WHITE, 1);
-
-    if (status.prediction.targetNavValid) {
-        char range[16];
-
-        if (status.prediction.targetRangeMetres < 1000.0) {
-            snprintf(range, sizeof(range), "%.0fm", status.prediction.targetRangeMetres);
-        } else {
-            snprintf(range, sizeof(range), "%.2fkm", status.prediction.targetRangeMetres / 1000.0);
-        }
-
-        snprintf(
-            buffer,
-            sizeof(buffer),
-            "RNG %s  BRG %.0f true",
-            range,
-            status.prediction.targetBearingDegrees
-        );
-        lineText(192, buffer, green(), 1);
-    } else {
-        lineText(192, "Prediction range waits for local GPS.", grey(), 1);
-    }
-
-    snprintf(
-        buffer,
-        sizeof(buffer),
-        "Time: %s",
-        status.prediction.predictionTime[0] ? status.prediction.predictionTime : "--"
-    );
-
-    // Compact field kept above the footer bar.
-    fieldText(10, 204, SCREEN_W - 20, 9, buffer, grey(), 1);
+    fieldText(10, 194, 300, 13, buffer, TFT_WHITE, 1);
 }
-
 
 struct HomeTileSpec {
     DisplayPage page;
@@ -1611,7 +1644,7 @@ void drawHelpPage() {
     lineText(138, "S Scan on/off L Log", TFT_WHITE, 1);
     lineText(156, "B Screen      K Keyboard", TFT_WHITE, 1);
     lineText(174, "P Auto dim    A Reset", TFT_WHITE, 1);
-    lineText(192, "D Touch on/off  H Home", TFT_WHITE, 1);
+    lineText(192, "N/C Wi-Fi    Space layer", TFT_WHITE, 1);
 }
 
 void drawHelpStatusPage() {
@@ -1669,6 +1702,55 @@ void drawAboutPage() {
     clearField(10, 132, SCREEN_W - 20, 76);
 }
 
+
+void drawWebModeScreen(
+    const AppStatus& status,
+    const char* ipAddress,
+    const char* webStatus
+) {
+    if (currentScreen != ScreenMode::WebMode) {
+        clearScreen();
+
+        // Same visual family as the boot splash, but clearly a mode screen.
+        drawAnetLogo();
+        centreTextAt(102, VersionInfo::SPLASH_NAME, green(), 2);
+        textAt(218, 110, VersionInfo::VERSION, grey(), 1);
+
+        tft.drawFastHLine(72, 132, SCREEN_W - 144, green());
+        centreTextAt(140, "WEB MODE", green(), 1);
+        tft.drawFastHLine(72, 156, SCREEN_W - 144, green());
+
+        currentScreen = ScreenMode::WebMode;
+        clearTextCache();
+        clearHomeTileCache();
+    }
+
+    const char* safeStatus =
+        webStatus != nullptr && webStatus[0] != '\0'
+            ? webStatus
+            : "waiting for Wi-Fi";
+
+    char buffer[96];
+
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "%s",
+        status.webServerRunning ? "Read-only dashboard active" : "Waiting for hotspot/Wi-Fi"
+    );
+    centreFieldText(34, 166, SCREEN_W - 68, 14, buffer, status.webServerRunning ? TFT_WHITE : amber(), 1);
+
+    if (status.webServerRunning && ipAddress != nullptr && ipAddress[0] != '\0') {
+        snprintf(buffer, sizeof(buffer), "http://%s/", ipAddress);
+    } else {
+        snprintf(buffer, sizeof(buffer), "%s", safeStatus);
+    }
+
+    centreFieldText(34, 184, SCREEN_W - 68, 14, buffer, green(), 1);
+
+    centreFieldText(34, 204, SCREEN_W - 68, 14, "Capture/decode still running", grey(), 1);
+    centreTextAt(224, "SPACE to exit", TFT_WHITE, 1);
+}
 }
 
 bool SondeDisplay::begin() {
@@ -1867,6 +1949,18 @@ void SondeDisplay::showPage(
     }
 
     pageFullRedraw = false;
+}
+
+void SondeDisplay::showWebMode(
+    const AppStatus& status,
+    const char* ipAddress,
+    const char* webStatus
+) {
+    if (!ready_) {
+        return;
+    }
+
+    drawWebModeScreen(status, ipAddress, webStatus);
 }
 
 void SondeDisplay::showDecodeFailure(

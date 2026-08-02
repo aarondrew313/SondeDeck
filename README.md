@@ -2,15 +2,15 @@
 
 **SondeDeck** is a handheld RS41 radiosonde recovery receiver firmware for the **LilyGO T-Deck Plus**.
 
-It uses the onboard **SX1262** radio to receive RS41 radiosonde frames, decodes telemetry on-device, displays recovery/navigation information on the TFT, supports optional SD logging, and can query SondeHub predictions in read-only mode.
+It uses the onboard **SX1262** radio to receive RS41 radiosonde frames, decodes telemetry on-device, displays recovery/navigation information on the TFT, supports optional SD logging, and can provide a read-only phone dashboard over Wi-Fi.
 
 > SondeDeck can query SondeHub predictions in read-only mode, but it is not affiliated with or endorsed by SondeHub.
 
 ## Current release
 
-**Version:** v1.1
+**Version:** v1.2
 
-v1.1 adds a touchscreen Home UI, global status indicators, improved page navigation, better T-Deck Plus GPS handling, and several UI polish/flicker fixes.
+v1.2 adds read-only Web Mode, a phone-friendly live dashboard, saved Wi-Fi configuration from the device, a Google Maps sonde-position link, and a cleaner Web/Home/Info control bar.
 
 ## Supported hardware
 
@@ -55,6 +55,10 @@ Not currently supported:
 - Frequency preset stepping
 - Basic RS41 preset scanning
 - Optional Wi-Fi
+- Saved Wi-Fi configuration from the device UI
+- Read-only Web Mode
+- Phone-friendly live dashboard
+- Google Maps link for sonde GPS position
 - Read-only SondeHub prediction lookup by serial
 - Battery percentage display
 - Screen brightness control
@@ -62,9 +66,34 @@ Not currently supported:
 - Touch input enable/disable setting
 - Splash, Help, status-icon Help, and About pages
 
-## v1.1 interface
+## v1.2 highlights
 
-After the boot splash, SondeDeck now opens to a Home screen with a 4x2 grid for the eight main pages:
+v1.2 introduces a dedicated Web Mode for remote viewing.
+
+This is intended for situations where the T-Deck is not easily accessible, for example if it is lifted higher on a drone and you want to check from your phone whether it is receiving a sonde.
+
+Web Mode is deliberately **read-only**:
+
+- no scan control
+- no logging control
+- no frequency control
+- no settings control
+- no reboot/control endpoints
+- no SondeDeck control from the webpage
+
+The receiver continues running while Web Mode is active:
+
+- radio capture continues
+- RS41 decoding continues
+- local GPS continues
+- SD logging continues if enabled
+- SondeHub prediction lookup can continue if Wi-Fi is connected
+
+Normal TFT pages are not drawn during Web Mode. The screen shows a static Web Mode splash/status screen and only **Space** exits Web Mode.
+
+## Home screen
+
+After the boot splash, SondeDeck opens to a Home screen with a 4x2 grid for the eight main pages:
 
 - Overview
 - Sonde
@@ -123,9 +152,25 @@ Online:
 - Amber: configured but not connected
 - Red: not configured
 
+## Bottom control bar
+
+The bottom bar is now a control bar:
+
+```text
+[Web]                 [Home]                 [Info]
+```
+
+Controls:
+
+- **Web** starts read-only Web Mode
+- **Home** returns to the Home screen
+- **Info** cycles Help -> Icons -> About
+
+The old footer counter/status line was removed because those values are available on the relevant pages.
+
 ## Top status bar
 
-The global top bar is shown across the UI, including the Home screen.
+The global top bar is shown across the normal TFT UI, including the Home screen.
 
 Status fields:
 
@@ -157,6 +202,170 @@ W--  Wi-Fi not configured
 
 The battery icon and battery percentage are shown on the right.
 
+## Web Mode
+
+Web Mode is a read-only local dashboard.
+
+It uses Wi-Fi client/STA mode only. SondeDeck connects to an existing Wi-Fi network, such as your phone hotspot, and your phone opens the SondeDeck IP address.
+
+Web Mode does **not** create its own access point.
+
+### Starting Web Mode
+
+From the TFT UI:
+
+```text
+Tap Web in the bottom control bar
+```
+
+or press:
+
+```text
+M
+```
+
+### Exiting Web Mode
+
+Only this exits Web Mode:
+
+```text
+Space
+```
+
+While Web Mode is active:
+
+- touch is ignored
+- trackball is ignored
+- keyboard is ignored except Space
+- the web page is read-only
+- normal TFT page drawing is stopped
+
+### Web routes
+
+```text
+GET /
+GET /api/status
+```
+
+There are no POST routes and no command/control endpoints.
+
+### Web dashboard data
+
+The phone dashboard shows:
+
+- sonde heard / waiting state
+- sonde serial
+- frame number
+- RSSI and peak RSSI
+- sonde GPS state
+- sonde latitude/longitude/altitude
+- local GPS state
+- local latitude/longitude/altitude
+- range, bearing, and elevation
+- frequency and scan state
+- SD/logging state
+- battery percentage
+- Wi-Fi status and IP address
+
+When sonde GPS is valid, the dashboard shows a read-only Google Maps link:
+
+```text
+Open sonde in Google Maps
+```
+
+The link opens:
+
+```text
+https://www.google.com/maps/search/?api=1&query=<lat>,<lon>
+```
+
+## Wi-Fi configuration
+
+Wi-Fi can be configured from the Online page.
+
+Controls:
+
+```text
+O       Online page
+N       Edit SSID
+C       Edit password
+
+Enter   Save
+Ball    Save
+Backspace delete
+Space   Cycle ABC / 123 / SYM input mode
+```
+
+Wi-Fi credentials are saved in ESP32 flash using Preferences.
+
+There is no Wi-Fi scanning. SondeDeck simply tries the saved SSID/password.
+
+If no saved credentials exist, SondeDeck can still fall back to compile-time values in:
+
+```text
+src/config/wifi_config.h
+```
+
+Leave the SSID blank to keep Wi-Fi disabled by default.
+
+### Wi-Fi states
+
+```text
+W--  no SSID configured
+W..  SSID configured but not connected
+ONL  connected
+```
+
+### Wi-Fi text input modes
+
+When editing Wi-Fi text, normal page/action controls are locked out.
+
+The editor has three modes:
+
+```text
+ABC -> 123 -> SYM -> ABC
+```
+
+Use Space while editing to cycle modes.
+
+123 mode:
+
+```text
+W E R  ->  1 2 3
+S D F  ->  4 5 6
+Z X C  ->  7 8 9
+Q/P    ->  0 fallback
+```
+
+SYM mode:
+
+```text
+Q T Y U I O P  ->  # ( ) - ' " @
+A G H J K      ->  * / _ ; :
+V B N M        ->  ? ! , $
+```
+
+The physical printed `0`/microphone key may not report through the keyboard library on some units, so `Q` and `P` are used as fallback `0` keys in 123 mode.
+
+## SondeHub predictions
+
+Wi-Fi is optional.
+
+SondeDeck can query SondeHub predictions by serial using the v2 predictions endpoint:
+
+```text
+https://api.v2.sondehub.org/predictions?vehicles=<SERIAL>
+```
+
+SondeDeck does not upload:
+
+- telemetry
+- listener/station position
+- chase-car position
+- recovery reports
+
+Prediction lookup depends on SondeHub already knowing about the sonde from another receiver or uploader.
+
 ## Controls
 
 Keyboard shortcuts:
@@ -173,7 +382,7 @@ O       Online
 H       Home
 
 Space   Help -> Icons -> About -> return
-?       Help -> Icons -> About -> Help
+Info    Help -> Icons -> About
 
 U/I     Move between Home tiles / pages
 Enter   Open selected Home tile
@@ -187,21 +396,23 @@ S       Toggle scan on/off
 Z/X     Previous/next frequency preset
 A       Reset counters and peak RSSI
 P       Toggle auto dim
+M       Start Web Mode
 ```
 
 Touch controls:
 
 ```text
 Tap a Home tile     Open that page
+Tap Web             Start read-only Web Mode
 Tap Home            Return to Home
-Tap ?               Help -> Icons -> About -> Help
+Tap Info            Help -> Icons -> About
 ```
 
-Trackball and keyboard input remain available even when touch input is disabled.
+Trackball and keyboard input remain available when touch input is disabled.
 
 ## Default UI settings
 
-v1.1 defaults:
+v1.2 defaults:
 
 ```text
 Touch input: ON
@@ -271,33 +482,6 @@ L
 
 If no SD card is present, SondeDeck continues running normally without logging.
 
-## Wi-Fi and SondeHub predictions
-
-Wi-Fi is optional.
-
-Configure Wi-Fi in:
-
-```text
-src/config/wifi_config.h
-```
-
-Leave the SSID blank to keep Wi-Fi disabled.
-
-SondeDeck can query SondeHub predictions by serial using the v2 predictions endpoint:
-
-```text
-https://api.v2.sondehub.org/predictions?vehicles=<SERIAL>
-```
-
-SondeDeck does not upload:
-
-- telemetry
-- listener/station position
-- chase-car position
-- recovery reports
-
-Prediction lookup depends on SondeHub already knowing about the sonde from another receiver or uploader.
-
 ## Configuration files
 
 Important project configuration files:
@@ -315,10 +499,10 @@ Version information is set in:
 src/config/version.h
 ```
 
-For v1.1:
+For v1.2:
 
 ```cpp
-constexpr const char* VERSION = "v1.1";
+constexpr const char* VERSION = "v1.2";
 ```
 
 ## Building
@@ -396,8 +580,11 @@ LICENSE
 - No offline wind-model prediction
 - No handheld SondeHub telemetry upload
 - SondeHub predictions require internet and external SondeHub data
+- Web Mode is read-only
+- Web Mode requires the phone/device to be able to reach SondeDeck on the same Wi-Fi/hotspot network
 - Local GPS may not fix indoors
 - Battery USB/charging indication may be inferred from voltage depending on hardware support
+- The physical printed `0`/microphone key may not report through the keyboard library
 
 ## Safety and legal notes
 

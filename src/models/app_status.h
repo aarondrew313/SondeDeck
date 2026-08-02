@@ -38,10 +38,19 @@ struct AppStatus {
     bool tftEnabled = true;
     bool touchAvailable = false;
     bool touchEnabled = true;
+    bool webModeEnabled = false;
+    bool webServerRunning = false;
     bool displayDimmed = false;
     bool dimmingEnabled = false;
     uint32_t dimTimeoutSeconds = 60;
     uint32_t secondsUntilDim = 0;
+
+    bool wifiEditActive = false;
+    bool wifiEditPassword = false;
+    bool wifiEditNumericMode = false;
+    char wifiEditMode[4] = "ABC";
+    char wifiEditField[12] = "";
+    char wifiEditValue[65] = "";
 
     NetworkStatus network;
     PredictionInfo prediction;

@@ -9,6 +9,7 @@
 #include "input/touch.h"
 #include "navigation/chase_math.h"
 #include "network/sonde_wifi.h"
+#include "network/web_dashboard.h"
 #include "power/battery_monitor.h"
 #include "power/power_settings.h"
 #include "prediction/online_prediction.h"
@@ -23,6 +24,7 @@ constexpr uint32_t SIGNAL_LOST_MS = 10000;
 constexpr uint32_t IDLE_DISPLAY_REFRESH_MS = 1000;
 constexpr uint32_t TOUCH_ACTION_DEBOUNCE_MS = 350;
 constexpr uint32_t BRIGHTNESS_ACTION_DEBOUNCE_MS = 250;
+constexpr uint32_t WEB_SNAPSHOT_REFRESH_MS = 1000;
 
 // Runtime serial output is now release-style by default. Set the verbose
 // flags to true only when debugging decoder/GPS/radio internals.
@@ -41,6 +43,7 @@ LocalGps localGps;
 SdLogger sdLogger;
 PowerSettings powerSettings;
 SondeWifi sondeWifi;
+WebDashboard webDashboard;
 OnlinePredictionClient onlinePrediction;
 FrequencyManager frequencyManager;
 
@@ -61,8 +64,25 @@ uint32_t lastUserActivityMs = 0;
 char lastKeyboardKey = 0;
 uint8_t homeSelection = 0;
 bool touchEnabled = true;
+bool webModeEnabled = false;
 uint32_t lastTouchActionMs = 0;
 uint32_t lastBrightnessActionMs = 0;
+uint32_t lastWebSnapshotMs = 0;
+uint32_t suppressTouchUntilMs = 0;
+
+enum class WifiEditField {
+    None,
+    Ssid,
+    Password
+};
+
+WifiEditField wifiEditField = WifiEditField::None;
+
+// 0 = ABC, 1 = 123, 2 = SYM.
+// The physical 0/mic key does not currently report through the keyboard
+// library, so 0 is provided on the fallback 123 layer.
+uint8_t wifiEditMode = 0;
+char wifiEditBuffer[65] = {};
 
 int8_t peakRssiDbm = -127;
 
@@ -78,6 +98,12 @@ void moveHomeSelection(int8_t delta);
 void selectHomeTile(uint8_t index);
 void handleTouchEvent(const TouchEvent& event);
 void handleHelpButtonTouch();
+void enterWebMode();
+void exitWebMode();
+void processWebModeInput();
+void refreshWebDashboardSnapshot(bool force);
+void updateWebMode();
+AppStatus buildStatus();
 
 void waitForSplashContinue() {
     display.showSplash(true);
@@ -135,6 +161,11 @@ void waitForKeyboardRelease() {
 
 void applyPowerOutputs() {
     display.setBrightnessPercent(powerSettings.effectiveScreenBrightnessPercent());
+
+    if (webModeEnabled) {
+        keyboard.setBacklight(0);
+        return;
+    }
 
     if (helpOpen()) {
         keyboard.setBacklight(keyboardPercentToRaw(powerSettings.helpKeyboardBrightness()));
@@ -259,13 +290,18 @@ int8_t homeTileFromTouch(int16_t x, int16_t y) {
     return -1;
 }
 
-bool touchInHelpButton(const TouchEvent& event) {
-    return event.x >= 292 && event.x <= 319 &&
+bool touchInWebButton(const TouchEvent& event) {
+    return event.x >= 0 && event.x < 72 &&
            event.y >= 215 && event.y <= 239;
 }
 
 bool touchInHomeButton(const TouchEvent& event) {
-    return event.x >= 244 && event.x < 292 &&
+    return event.x >= 118 && event.x < 202 &&
+           event.y >= 215 && event.y <= 239;
+}
+
+bool touchInHelpButton(const TouchEvent& event) {
+    return event.x >= 248 && event.x <= 319 &&
            event.y >= 215 && event.y <= 239;
 }
 
@@ -373,12 +409,327 @@ void selectHomeTile(uint8_t index) {
     goToPage(pageForHomeTile(index));
 }
 
+bool wifiEditActive() {
+    return wifiEditField != WifiEditField::None;
+}
+
+void beginWifiEdit(WifiEditField field) {
+    closeHelp();
+    activePage = DisplayPage::Online;
+    wifiEditField = field;
+    wifiEditMode = 0;
+
+    if (field == WifiEditField::Ssid) {
+        strncpy(wifiEditBuffer, sondeWifi.ssid(), sizeof(wifiEditBuffer) - 1);
+    } else if (field == WifiEditField::Password) {
+        strncpy(wifiEditBuffer, sondeWifi.password(), sizeof(wifiEditBuffer) - 1);
+    } else {
+        wifiEditBuffer[0] = '\0';
+    }
+
+    wifiEditBuffer[sizeof(wifiEditBuffer) - 1] = '\0';
+    lastKeyboardKey = 0;
+    display.resetScreen();
+    forceDisplayRefresh();
+}
+
+void cancelWifiEdit() {
+    wifiEditField = WifiEditField::None;
+    wifiEditMode = 0;
+    wifiEditBuffer[0] = '\0';
+    lastKeyboardKey = 0;
+    display.resetScreen();
+    forceDisplayRefresh();
+}
+
+void saveWifiEdit() {
+    if (wifiEditField == WifiEditField::Ssid) {
+        sondeWifi.setCredentials(wifiEditBuffer, sondeWifi.password());
+    } else if (wifiEditField == WifiEditField::Password) {
+        sondeWifi.setCredentials(sondeWifi.ssid(), wifiEditBuffer);
+    }
+
+    wifiEditField = WifiEditField::None;
+    wifiEditMode = 0;
+    wifiEditBuffer[0] = '\0';
+    lastKeyboardKey = 0;
+    display.resetScreen();
+    forceDisplayRefresh();
+}
+
+char wifiNumberLayerChar(char key) {
+    const char upper = static_cast<char>(toupper(static_cast<unsigned char>(key)));
+
+    // 123 layer. The printed hardware number key for 0 does not currently
+    // report through the keyboard library, so Q/P are fallback 0 keys.
+    switch (upper) {
+        case 'W': return '1';
+        case 'E': return '2';
+        case 'R': return '3';
+
+        case 'S': return '4';
+        case 'D': return '5';
+        case 'F': return '6';
+
+        case 'Z': return '7';
+        case 'X': return '8';
+        case 'C': return '9';
+
+        case 'Q':
+        case 'P':
+            return '0';
+
+        case '0': return '0';
+        case '1': return '1';
+        case '2': return '2';
+        case '3': return '3';
+        case '4': return '4';
+        case '5': return '5';
+        case '6': return '6';
+        case '7': return '7';
+        case '8': return '8';
+        case '9': return '9';
+
+        default:
+            return 0;
+    }
+}
+
+char wifiSymbolLayerChar(char key) {
+    const char upper = static_cast<char>(toupper(static_cast<unsigned char>(key)));
+
+    // SYM layer matched to the printed non-number legends.
+    switch (upper) {
+        case 'Q': return '#';
+        case 'T': return '(';
+        case 'Y': return ')';
+        case 'U': return '-';
+        case 'I': return '\'';
+        case 'O': return '"';
+        case 'P': return '@';
+
+        case 'A': return '*';
+        case 'G': return '/';
+        case 'H': return '_';
+        case 'J': return ';';
+        case 'K': return ':';
+
+        case 'V': return '?';
+        case 'B': return '!';
+        case 'N': return ',';
+        case 'M': return '$';
+
+        case '#':
+        case '(':
+        case ')':
+        case '-':
+        case '\'':
+        case '"':
+        case '@':
+        case '*':
+        case '/':
+        case '_':
+        case ';':
+        case ':':
+        case '?':
+        case '!':
+        case ',':
+        case '$':
+            return key;
+
+        default:
+            return 0;
+    }
+}
+
+void appendWifiEditChar(char key) {
+    const size_t length = strlen(wifiEditBuffer);
+
+    if (length >= sizeof(wifiEditBuffer) - 1) {
+        return;
+    }
+
+    wifiEditBuffer[length] = key;
+    wifiEditBuffer[length + 1] = '\0';
+    forceDisplayRefresh();
+}
+
+void handleWifiEditKey(char key) {
+    if (!wifiEditActive()) {
+        return;
+    }
+
+    if (key == '\r' || key == '\n') {
+        saveWifiEdit();
+        return;
+    }
+
+    if (key == ' ') {
+        wifiEditMode = static_cast<uint8_t>((wifiEditMode + 1) % 3);
+        forceDisplayRefresh();
+        return;
+    }
+
+    if (key == 8 || key == 127) {
+        const size_t length = strlen(wifiEditBuffer);
+
+        if (length > 0) {
+            wifiEditBuffer[length - 1] = '\0';
+            forceDisplayRefresh();
+        }
+
+        return;
+    }
+
+    if (wifiEditMode == 1) {
+        const char mapped = wifiNumberLayerChar(key);
+
+        if (mapped != 0) {
+            appendWifiEditChar(mapped);
+        }
+
+        return;
+    }
+
+    if (wifiEditMode == 2) {
+        const char mapped = wifiSymbolLayerChar(key);
+
+        if (mapped != 0) {
+            appendWifiEditChar(mapped);
+        }
+
+        return;
+    }
+
+    if (key >= 32 && key <= 126) {
+        appendWifiEditChar(key);
+    }
+}
+
+void enterWebMode() {
+    closeHelp();
+    webModeEnabled = true;
+    activePage = DisplayPage::Power;
+    powerSettings.setDisplayDimmed(false);
+    applyPowerOutputs();
+
+    // Start immediately if Wi-Fi is already connected; otherwise the web-mode
+    // loop will keep trying while SondeWifi updates.
+    webDashboard.begin();
+    lastWebSnapshotMs = 0;
+    refreshWebDashboardSnapshot(true);
+
+    display.resetScreen();
+    display.showWebMode(
+        buildStatus(),
+        webDashboard.ipAddress(),
+        webDashboard.statusText()
+    );
+}
+
+void exitWebMode() {
+    webDashboard.stop();
+    webModeEnabled = false;
+
+    // If Web Mode was entered by touching the Web button, the touch controller
+    // can still have that old tap pending because touch input is ignored during
+    // Web Mode. Suppress touch briefly so exiting with Space cannot immediately
+    // re-enter Web Mode from the stale tap.
+    suppressTouchUntilMs = millis() + 900;
+    lastTouchActionMs = millis();
+    lastKeyboardKey = ' ';
+
+    openHome();
+    applyPowerOutputs();
+    forceDisplayRefresh();
+}
+
+void processWebModeInput() {
+    // Web Mode is deliberately read-only and ignores touch, trackball, and all
+    // keyboard input except SPACE. This avoids accidental control while the
+    // T-Deck is being used as a remote receiver/display source.
+    const char key = keyboard.readKey();
+
+    if (key == ' ') {
+        exitWebMode();
+        return;
+    }
+
+    while (Serial.available() > 0) {
+        const char c = static_cast<char>(Serial.read());
+        if (c == ' ') {
+            exitWebMode();
+            return;
+        }
+    }
+}
+
+void refreshWebDashboardSnapshot(bool force) {
+    const uint32_t now = millis();
+
+    if (!force && now - lastWebSnapshotMs < WEB_SNAPSHOT_REFRESH_MS) {
+        return;
+    }
+
+    lastWebSnapshotMs = now;
+
+    if (hasLastTelemetry) {
+        lastNavigation =
+            calculateNavigation(localGps, lastTelemetry, lastGpsUsable);
+    } else {
+        SondeTelemetry blank;
+        lastNavigation =
+            calculateNavigation(localGps, blank, false);
+    }
+
+    const AppStatus status = buildStatus();
+
+    webDashboard.updateSnapshot(
+        hasLastTelemetry ? &lastTelemetry : nullptr,
+        hasLastTelemetry,
+        lastGpsUsable,
+        lastNavigation,
+        status
+    );
+}
+
+void updateWebMode() {
+    // Keep Wi-Fi, decoder, GPS, logging, prediction, and web serving active,
+    // but stop normal TFT UI updates while Web Mode is enabled.
+    if (webDashboard.running() && !sondeWifi.connected()) {
+        webDashboard.stop();
+        display.showWebMode(
+            buildStatus(),
+            webDashboard.ipAddress(),
+            webDashboard.statusText()
+        );
+    }
+
+    if (!webDashboard.running() && sondeWifi.connected()) {
+        webDashboard.begin();
+        display.showWebMode(
+            buildStatus(),
+            webDashboard.ipAddress(),
+            webDashboard.statusText()
+        );
+    }
+
+    refreshWebDashboardSnapshot(false);
+    webDashboard.handleClient();
+    processWebModeInput();
+}
+
 void handleKey(char key) {
     if (key == 0) {
         return;
     }
 
     markUserActivity();
+
+    if (wifiEditActive()) {
+        handleWifiEditKey(key);
+        return;
+    }
 
     if (key == ' ') {
         advanceHelpCycle();
@@ -448,6 +799,20 @@ void handleKey(char key) {
             openHome();
             break;
 
+        case 'N':
+            if (activePage == DisplayPage::Online && !helpOpen()) {
+                beginWifiEdit(WifiEditField::Ssid);
+                return;
+            }
+            break;
+
+        case 'C':
+            if (activePage == DisplayPage::Online && !helpOpen()) {
+                beginWifiEdit(WifiEditField::Password);
+                return;
+            }
+            break;
+
         // Actions.
         case 'B': {
             const uint32_t now = millis();
@@ -474,6 +839,10 @@ void handleKey(char key) {
         case 'D':
             touchEnabled = !touchEnabled;
             break;
+
+        case 'M':
+            enterWebMode();
+            return;
 
         case 'L':
             sdLogger.toggleEnabled();
@@ -552,6 +921,10 @@ void handleTouchEvent(const TouchEvent& event) {
         return;
     }
 
+    if (millis() < suppressTouchUntilMs) {
+        return;
+    }
+
     markUserActivity();
 
     if (event.type != TouchEventType::Tap) {
@@ -564,15 +937,21 @@ void handleTouchEvent(const TouchEvent& event) {
     }
     lastTouchActionMs = now;
 
-    if (touchInHelpButton(event)) {
-        handleHelpButtonTouch();
-        forceDisplayRefresh();
+    if (touchInWebButton(event)) {
+        closeHelp();
+        enterWebMode();
         return;
     }
 
     if (touchInHomeButton(event)) {
         closeHelp();
         openHome();
+        forceDisplayRefresh();
+        return;
+    }
+
+    if (touchInHelpButton(event)) {
+        handleHelpButtonTouch();
         forceDisplayRefresh();
         return;
     }
@@ -588,6 +967,31 @@ void handleTouchEvent(const TouchEvent& event) {
 }
 
 void processInput() {
+    if (wifiEditActive()) {
+        const char key = keyboard.readKey();
+
+        if (key == 0) {
+            lastKeyboardKey = 0;
+        } else if (key != lastKeyboardKey) {
+            lastKeyboardKey = key;
+            handleWifiEditKey(key);
+        }
+
+        if (trackball.poll() == TrackballEvent::Press) {
+            saveWifiEdit();
+            return;
+        }
+
+        // Touch is intentionally ignored while editing Wi-Fi fields.
+        touchInput.poll();
+
+        while (Serial.available() > 0) {
+            handleWifiEditKey(static_cast<char>(Serial.read()));
+        }
+
+        return;
+    }
+
     const char key = keyboard.readKey();
 
     if (key == 0) {
@@ -638,6 +1042,31 @@ AppStatus buildStatus() {
     status.tftEnabled = true;
     status.touchAvailable = touchInput.available();
     status.touchEnabled = touchEnabled;
+    status.webModeEnabled = webModeEnabled;
+    status.webServerRunning = webDashboard.running();
+
+    status.wifiEditActive = wifiEditActive();
+    status.wifiEditPassword = wifiEditField == WifiEditField::Password;
+    status.wifiEditNumericMode = wifiEditMode == 1;
+
+    const char* wifiModeText =
+        wifiEditMode == 1 ? "123" :
+        wifiEditMode == 2 ? "SYM" :
+                            "ABC";
+    strncpy(status.wifiEditMode, wifiModeText, sizeof(status.wifiEditMode) - 1);
+    status.wifiEditMode[sizeof(status.wifiEditMode) - 1] = '\0';
+
+    if (wifiEditField == WifiEditField::Ssid) {
+        strncpy(status.wifiEditField, "SSID", sizeof(status.wifiEditField) - 1);
+    } else if (wifiEditField == WifiEditField::Password) {
+        strncpy(status.wifiEditField, "Password", sizeof(status.wifiEditField) - 1);
+    } else {
+        status.wifiEditField[0] = '\0';
+    }
+
+    status.wifiEditField[sizeof(status.wifiEditField) - 1] = '\0';
+    strncpy(status.wifiEditValue, wifiEditBuffer, sizeof(status.wifiEditValue) - 1);
+    status.wifiEditValue[sizeof(status.wifiEditValue) - 1] = '\0';
     status.displayDimmed = powerSettings.displayDimmed();
     status.dimmingEnabled = powerSettings.dimmingEnabled();
     status.dimTimeoutSeconds = powerSettings.dimTimeoutSeconds();
@@ -939,12 +1368,12 @@ void setup() {
 
     Serial.println();
     Serial.println("========================================");
-    Serial.printf(" %s %s - v1.1 Home UI\n", VersionInfo::APP_NAME, VersionInfo::VERSION);
+    Serial.printf(" %s %s - Web UI build\n", VersionInfo::APP_NAME, VersionInfo::VERSION);
     Serial.println("========================================");
     Serial.println("Press SPACE on the T-Deck keyboard to start.");
     Serial.println("After startup, Home appears. SPACE cycles Help -> Icons -> About -> close.");
     Serial.println("Pages: Q/W/E/R/T/Y/F/O or touch Home tiles. Y opens Settings. H returns Home.");
-    Serial.println("Touch: Home tiles, Home button and ? button. Predictions use SondeHub by serial only.");
+    Serial.println("Touch: Home tiles, Web/Home/Info bar. N/C edit Wi-Fi. M starts read-only Web Mode.");
     Serial.println();
 
     waitForSplashContinue();
@@ -1010,16 +1439,28 @@ void setup() {
 void loop() {
     sondeWifi.update();
     localGps.update();
-    processInput();
+
+    if (webModeEnabled) {
+        processWebModeInput();
+    } else {
+        processInput();
+    }
+
     localGps.update();
 
     receiver.update();
     updateFrequencyScan();
     localGps.update();
 
+    if (webModeEnabled) {
+        updateWebMode();
+    }
+
     if (!receiver.frameAvailable()) {
-        handlePowerDimming();
-        refreshDisplay(false);
+        if (!webModeEnabled) {
+            handlePowerDimming();
+            refreshDisplay(false);
+        }
         delay(1);
         return;
     }
@@ -1114,19 +1555,29 @@ void loop() {
             Serial.println();
         }
 
-        refreshDisplay(true);
+        if (webModeEnabled) {
+            refreshWebDashboardSnapshot(true);
+            webDashboard.handleClient();
+        } else {
+            refreshDisplay(true);
+        }
     } else {
         ++rejectedFrames;
         frequencyManager.noteFrameRssi(result.telemetry.rssiDbm);
         printDecoderFailure(result);
 
-        const AppStatus status = buildStatus();
+        if (!webModeEnabled) {
+            const AppStatus status = buildStatus();
 
-        display.showDecodeFailure(
-            Rs41Decoder::statusText(result.status),
-            result.telemetry.rssiDbm,
-            status
-        );
+            display.showDecodeFailure(
+                Rs41Decoder::statusText(result.status),
+                result.telemetry.rssiDbm,
+                status
+            );
+        } else {
+            refreshWebDashboardSnapshot(false);
+            webDashboard.handleClient();
+        }
     }
 
     receiver.releaseFrame();

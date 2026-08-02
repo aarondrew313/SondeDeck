@@ -31,6 +31,12 @@ public:
         uint8_t homeSelection = 0
     );
 
+    void showWebMode(
+        const AppStatus& status,
+        const char* ipAddress,
+        const char* webStatus
+    );
+
     void showDecodeFailure(
         const char* reason,
         int8_t rssiDbm,
