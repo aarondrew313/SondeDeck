@@ -1458,12 +1458,6 @@ void drawHomeTile(
     uint16_t outline = index == selectedIndex ? green() : darkGrey();
     uint16_t text = index == selectedIndex ? green() : TFT_WHITE;
 
-    if (homeTiles[index].page == DisplayPage::Online &&
-        status.network.configured &&
-        !status.network.connected) {
-        outline = index == selectedIndex ? amber() : darkGrey();
-    }
-
     const bool sondeGpsGreen = sondeGpsAvailable(status);
     const bool sondeHeard = status.counters.validFrames > 0;
     const bool recoveryGreen = status.localGpsFix && sondeGpsGreen;
